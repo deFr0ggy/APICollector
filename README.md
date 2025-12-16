@@ -73,7 +73,7 @@ Replace manual header checks with the auto-assessor.
     *   Edit the JSON to define your `mandatory` (must have) and `forbidden` (must not have) headers.
     *   Click **Load Rules** to apply them. (Defaults are provided if you skip this).
 3.  **Run Assessment**:
-    *   Select endpoints in the **Endoints** tab (or all).
+    *   Select endpoints in the **Endpoints** tab (or all).
     *   Click **Assess Compliance**.
     *   The tool sends live requests and analyzes the response headers.
 4.  **Review Results**:
