@@ -11,7 +11,7 @@ from javax.swing import (
     JPanel, JButton, JTable, JScrollPane, JFileChooser,
     JCheckBox, JComboBox, JLabel, ListSelectionModel,
     JTabbedPane, JTextArea, JSplitPane, JEditorPane,
-    JTextField
+    JTextField, JOptionPane
 )
 from javax.swing.event import HyperlinkListener, HyperlinkEvent
 from javax.swing.event import HyperlinkListener, HyperlinkEvent
@@ -259,6 +259,16 @@ class BurpExtender(IBurpExtender, ITab):
             self.log("Import failed: %s" % e)
 
     def clear_data(self, event):
+        resp = JOptionPane.showConfirmDialog(
+            self.main_panel,
+            "Are you sure you want to clear all data? This cannot be undone.",
+            "Confirm Clear Data",
+            JOptionPane.YES_NO_OPTION
+        )
+        
+        if resp != JOptionPane.YES_OPTION:
+            return
+
         self.model.setRowCount(0)
         self.test_model.setRowCount(0)
         self.generated_tests_data = []
