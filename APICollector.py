@@ -23,7 +23,11 @@ from java.lang import Boolean
 import json
 import re
 import threading
+import shlex
+import threading
 import traceback
+from java.awt import Toolkit
+from java.awt.datatransfer import DataFlavor
 
 
 class BurpExtender(IBurpExtender, ITab):
@@ -93,6 +97,7 @@ class BurpExtender(IBurpExtender, ITab):
         )
 
         controls.add(JButton("Import API", actionPerformed=self.import_api))
+        controls.add(JButton("Paste cURL", actionPerformed=self.import_from_clipboard))
         controls.add(JButton("Clear Data", actionPerformed=self.clear_data))
         controls.add(JButton("Execute (Internal)", actionPerformed=self.send_endpoint_request))
         controls.add(JButton("Reset Request", actionPerformed=self.reset_endpoint_request))
@@ -250,13 +255,129 @@ class BurpExtender(IBurpExtender, ITab):
                 self.log("Detected Postman Collection")
                 self.parse_postman(root)
             else:
-                self.log("Unknown format. structure: %s" % root.keys())
-                self.parse_openapi(root) 
+                # Try cURL parsing as a fallback
+                is_curl = self.parse_curl(raw)
+                if not is_curl:
+                    self.log("Unknown format. structure: %s" % root.keys())
+                    self.parse_openapi(root) 
+                else:
+                    self.log("Detected cURL command")
 
             self.update_dashboard(None)
 
         except Exception as e:
             self.log("Import failed: %s" % e)
+
+    def import_from_clipboard(self, event):
+        try:
+            clipboard = Toolkit.getDefaultToolkit().getSystemClipboard()
+            contents = clipboard.getContents(None)
+            if contents and contents.isDataFlavorSupported(DataFlavor.stringFlavor):
+                text = contents.getTransferData(DataFlavor.stringFlavor)
+                if self.parse_curl(text):
+                    self.update_dashboard(None)
+                    self.stats.setText("Imported cURL from clipboard")
+                else:
+                    self.stats.setText("Clipboard content is not a valid cURL command")
+            else:
+                self.stats.setText("Clipboard is empty or not text")
+        except Exception as e:
+            self.log("Clipboard error: %s" % e)
+
+    def parse_curl(self, text):
+        if not text or "curl " not in text.lower():
+            return False
+            
+        try:
+            # Clean up the text: remove backslashes used for line continuation
+            clean_text = text.replace("\\\n", " ").replace("\\\r\n", " ").strip()
+            
+            # Use shlex to split preserving quotes
+            # Parsing "curl" command line arguments
+            try:
+                args = shlex.split(clean_text)
+            except:
+                # Fallback for simple splitting if shlex fails on weird chars
+                args = clean_text.split()
+                
+            if len(args) < 2:
+                return False
+                
+            url = None
+            method = "GET"
+            headers = []
+            body = None
+            auth = "None"
+            
+            i = 1
+            while i < len(args):
+                arg = args[i]
+                
+                if arg in ["-X", "--request"]:
+                    if i + 1 < len(args):
+                        method = args[i+1].upper()
+                        i += 1
+                elif arg in ["-H", "--header"]:
+                    if i + 1 < len(args):
+                        headers.append(args[i+1])
+                        i += 1
+                elif arg in ["-d", "--data", "--data-raw", "--data-binary", "--data-ascii"]:
+                    if i + 1 < len(args):
+                        body = args[i+1]
+                        method = "POST" # Default to POST if data is present
+                        i += 1
+                elif arg in ["-u", "--user"]:
+                     if i + 1 < len(args):
+                         auth = "Basic"
+                         i += 1
+                elif not arg.startswith("-") and not url:
+                    url = arg
+                
+                i += 1
+                
+            if not url:
+                return False
+                
+            # Clean URL
+            raw_url = self.resolve_vars(url)
+            if not raw_url.startswith("http"):
+                raw_url = "https://" + raw_url
+                
+            u = URL(raw_url)
+            domain = u.getHost()
+            scheme = u.getProtocol().upper()
+            path = u.getPath() or "/"
+            
+            # Check for specific headers to refine auth/content-type
+            for h in headers:
+                if "Authorization" in h:
+                    if "Bearer" in h: auth = "Bearer"
+                    elif "Basic" in h: auth = "Basic"
+                    else: auth = "API Key"
+            
+            risk = self.risk(method, auth)
+            
+            self.model.addRow([domain, scheme, method, path, auth, risk, "cURL", ""])
+            
+            if body:
+                self.bodies[self.model.getRowCount() - 1] = body
+                
+                # Try to extract params if JSON
+                req_params = []
+                try:
+                    j_body = json.loads(body)
+                    req_params = list(self._extract_json_keys(j_body))
+                except:
+                    pass
+                self.param_model.addRow([method, path, ", ".join(sorted(req_params)), ""])
+            else:
+                self.param_model.addRow([method, path, "", ""])
+                
+            return True
+            
+        except Exception as e:
+            self.log("cURL parse error: %s" % e)
+            return False
 
     def clear_data(self, event):
         self.model.setRowCount(0)
