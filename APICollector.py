@@ -1,18 +1,15 @@
 # -*- coding: utf-8 -*-
-
+import java.io.File
+import javax.swing.border
 from burp import IBurpExtender, ITab
-from javax.swing import (
-    JPanel, JButton, JTable, JScrollPane, JFileChooser,
-    JCheckBox, JComboBox, JLabel, ListSelectionModel
-)
-from javax.swing.table import DefaultTableModel
-from java.awt import BorderLayout
 from javax.swing import (
     JPanel, JButton, JTable, JScrollPane, JFileChooser,
     JCheckBox, JComboBox, JLabel, ListSelectionModel,
     JTabbedPane, JTextArea, JSplitPane, JEditorPane,
-    JTextField
+    JTextField, JOptionPane, BorderFactory, SwingUtilities
 )
+from javax.swing.table import DefaultTableModel
+from java.awt import BorderLayout
 from javax.swing.event import HyperlinkListener, HyperlinkEvent
 from javax.swing.event import HyperlinkListener, HyperlinkEvent
 from javax.swing.table import DefaultTableModel, DefaultTableCellRenderer
@@ -43,6 +40,27 @@ class BurpExtender(IBurpExtender, ITab):
         self.vulns = [] 
         
         self.generated_tests_data = [] 
+        
+        # Default Compliance Rules
+        self.compliance_rules = {
+            "mandatory": [
+                "Content-Type", 
+                "Strict-Transport-Security", 
+                "X-Content-Type-Options",
+                "Content-Security-Policy",
+                "X-Frame-Options", 
+                "Referrer-Policy", 
+                "Cache-Control", 
+                "Permissions-Policy"
+            ],
+            "forbidden": [
+                "Server", 
+                "X-Powered-By", 
+                "X-AspNet-Version",
+                "X-AspNetMvc-Version"
+            ]
+        }
+
         self._build_ui()
         callbacks.addSuiteTab(self)
 
@@ -60,7 +78,7 @@ class BurpExtender(IBurpExtender, ITab):
         )
 
         self.table = JTable(self.model)
-        self.table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
+        self.table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION)
         self.table.getSelectionModel().addListSelectionListener(self.auto_push_selected)
         
         self.table.getColumnModel().getColumn(1).setCellRenderer(SchemeRenderer())
@@ -103,7 +121,7 @@ class BurpExtender(IBurpExtender, ITab):
         controls.add(JButton("Reset Request", actionPerformed=self.reset_endpoint_request))
         controls.add(JButton("Send to Repeater", actionPerformed=self.push_selected))
         controls.add(JButton("Send All to Repeater", actionPerformed=self.push_all))
-        controls.add(JButton("Generate Security Tests", actionPerformed=self.generate_tests))
+        controls.add(JButton("Assess Compliance", actionPerformed=self.assess_compliance))
 
         controls.add(self.autoScan)
         controls.add(self.verbFilter)
@@ -157,10 +175,33 @@ class BurpExtender(IBurpExtender, ITab):
 
         self.test_manager_panel = JPanel(BorderLayout())
         
-        self.test_model = DefaultTableModel(["ID", "Method", "Path", "Type"], 0)
+        self.test_manager_panel = JPanel(BorderLayout())
+        
+        # Compliance Toolbar
+        comp_tools = JPanel(BorderLayout())
+        
+        # Stats Panel
+        self.comp_stats = JLabel("Compliance Status: Ready to assess. Load rules or use defaults.")
+        self.comp_stats.setBorder(javax.swing.border.EmptyBorder(5, 10, 5, 10))
+        comp_tools.add(self.comp_stats, BorderLayout.SOUTH)
+        
+        # Buttons
+        btns = JPanel()
+        btns.add(JButton("Load Rules", actionPerformed=self.load_rules))
+        btns.add(JButton("Save Sample Rules", actionPerformed=self.save_sample_rules))
+        btns.add(JButton("Run Assessment", actionPerformed=self.assess_compliance)) # Duplicate/Quick Access
+        comp_tools.add(btns, BorderLayout.CENTER)
+        
+        self.test_manager_panel.add(comp_tools, BorderLayout.NORTH)
+        
+        # Compliance Table: ID, Method, Path, Violation, Detail
+        self.test_model = DefaultTableModel(["ID", "Method", "Path", "Violation", "Detail"], 0)
         self.test_table = JTable(self.test_model)
         self.test_table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION)
         self.test_table.getSelectionModel().addListSelectionListener(self.test_selected)
+        
+        # Apply Renderer
+        self.test_table.getColumnModel().getColumn(3).setCellRenderer(ComplianceRenderer())
         
         self.preview_panel = JPanel(BorderLayout())
         
@@ -209,7 +250,7 @@ class BurpExtender(IBurpExtender, ITab):
         self.tabs.addTab("Endpoints", self.endpoints_panel)
         self.tabs.addTab("Dashboard", self.dashboard_panel)
         self.tabs.addTab("Environment", self.env_panel)
-        self.tabs.addTab("Test Manager", self.test_manager_panel)
+        self.tabs.addTab("Compliance", self.test_manager_panel)
         self.tabs.addTab("Parameters", self.param_panel)
 
         self.main_panel.add(self.tabs, BorderLayout.CENTER)
@@ -839,87 +880,132 @@ class BurpExtender(IBurpExtender, ITab):
         return hits
 
 
-    def generate_tests(self, event):
+    # ---------------- Compliance Logic ----------------
+
+    # ---------------- Compliance Logic ----------------
+
+    def save_sample_rules(self, event):
+        chooser = JFileChooser()
+        chooser.setSelectedFile(java.io.File("compliance_rules.json"))
+        chooser.setDialogTitle("Save Sample Rules")
+        
+        if chooser.showSaveDialog(self.main_panel) == JFileChooser.APPROVE_OPTION:
+            try:
+                path = chooser.getSelectedFile().getAbsolutePath()
+                with open(path, "w") as f:
+                    f.write(json.dumps(self.compliance_rules, indent=4))
+                JOptionPane.showMessageDialog(self.main_panel, "Saved sample rules to %s" % path)
+            except Exception as e:
+                self.log("Error saving rules: %s" % e)
+
+    def load_rules(self, event):
+        chooser = JFileChooser()
+        if chooser.showOpenDialog(self.main_panel) == JFileChooser.APPROVE_OPTION:
+            try:
+                path = chooser.getSelectedFile().getAbsolutePath()
+                with open(path, "r") as f:
+                    self.compliance_rules = json.load(f)
+                
+                # Validation check
+                if "mandatory" not in self.compliance_rules or "forbidden" not in self.compliance_rules:
+                     JOptionPane.showMessageDialog(self.main_panel, "Invalid format. Rules must contain 'mandatory' and 'forbidden' keys.")
+                     return
+                     
+                self.comp_stats.setText("<html><b>Rules Loaded:</b> %d Mandatory, %d Forbidden. Ready to assess.</html>" % (len(self.compliance_rules.get("mandatory", [])), len(self.compliance_rules.get("forbidden", []))))
+                JOptionPane.showMessageDialog(self.main_panel, "Loaded rules successfully.")
+            except Exception as e:
+                JOptionPane.showMessageDialog(self.main_panel, "Error loading rules: %s" % e)
+
+    def assess_compliance(self, event):
         rows = self.table.getSelectedRows()
         if len(rows) == 0:
-            self.stats.setText("Status: Select an endpoint first to generate tests.")
-            return
-        
-        count = 0
-        for i in rows:
-             self.create_test_cases(i)
-             count += 1
-             
-        self.stats.setText("Generated tests for %d endpoints. Check Test Manager tab." % count)
-        self.tabs.setSelectedIndex(2) 
-
-    def create_test_cases(self, row):
-        base_req_info = self.build_request_info(row)
-        if not base_req_info:
+            self.stats.setText("Select endpoints to assess.")
             return
 
-        payloads = [
-            ("' OR '1'='1", "SQLi_Basic"),
-            ("admin' --", "SQLi_Admin"),
-            ("<script>alert(1)</script>", "XSS_Reflected"),
-            ("../../../../../etc/passwd", "LFI"),
-            ("%2e%2e%2fetc%2fpasswd", "LFI_Encoded"),
-            ("NaN", "Error_Inducing")
-        ]
-
-        self.store_test(base_req_info, base_req_info['body'], "Baseline")
-
-
+        self.stats.setText("Assessing %d endpoints..." % len(rows))
+        self.test_model.setRowCount(0) # Clear previous results
+        self.generated_tests_data = []
         
-        if base_req_info['body']:
+        # Run in thread
+        t = threading.Thread(target=self._run_assessment, args=(rows,))
+        t.start()
+        
+        self.tabs.setSelectedIndex(3) # Switch to Compliance tab
+
+    def _run_assessment(self, rows):
+        total_endpoints = len(rows)
+        violations_count = 0
+        
+        for idx, row in enumerate(rows):
+            # Update progress every request
+            SwingUtilities.invokeLater(lambda: self.stats.setText("Assessing %d/%d..." % (idx + 1, total_endpoints)))
+            
+            info = self.build_request_info(row)
+            if not info: continue
+            
             try:
-                json_body = json.loads(base_req_info['body'])
-                self.fuzz_json(json_body, payloads, base_req_info)
-            except:
-                pass
-
-    def fuzz_json(self, root_data, payloads, base_req_info):
-        self._fuzz_recursive(root_data, [], payloads, base_req_info, root_data)
-
-    def _fuzz_recursive(self, current, path, payloads, base_req_info, root):
-        if isinstance(current, dict):
-            for k, v in current.items():
-                new_path = path + [k]
-                self._check_and_fuzz(v, new_path, payloads, base_req_info, root)
-                self._fuzz_recursive(v, new_path, payloads, base_req_info, root)
-        elif isinstance(current, list):
-            for i, v in enumerate(current):
-                new_path = path + [i]
-                self._check_and_fuzz(v, new_path, payloads, base_req_info, root)
-                self._fuzz_recursive(v, new_path, payloads, base_req_info, root)
-
-    def _check_and_fuzz(self, value, path, payloads, base_req_info, root):
-        if isinstance(value, (basestring, int, float)):
-            for p, name in payloads:
-                mutated_root = json.loads(json.dumps(root))
+                # Execute Request
+                req_bytes = self.helpers.buildHttpMessage(info['headers'], info['body'].encode('utf-8') if info['body'] else b"")
+                resp = self.callbacks.makeHttpRequest(
+                    info['host'],
+                    info['port'],
+                    info['use_https'],
+                    req_bytes
+                )
                 
-                target = mutated_root
-                for step in path[:-1]:
-                    target = target[step]
-                target[path[-1]] = str(value) + p
-                
-                self.store_test(base_req_info, json.dumps(mutated_root), "Fuzz_%s_%s" % (name, path[-1]))
-
-    def store_test(self, info, body_str, description):
-        req_headers = info['headers']
-        body_bytes = body_str.encode("utf-8") if body_str else b""
-        final_req = self.helpers.buildHttpMessage(req_headers, body_bytes)
+                if resp:
+                    r_info = self.helpers.analyzeResponse(resp)
+                    headers = r_info.getHeaders() # List of strings
+                    
+                    # Convert headers to dict for easy lookup (lowercase keys)
+                    h_dict = {}
+                    for h in headers:
+                        if ":" in h:
+                            parts = h.split(":", 1)
+                            h_dict[parts[0].strip().lower()] = parts[1].strip()
+                    
+                    # Check Mandatory
+                    missing = []
+                    for m in self.compliance_rules.get("mandatory", []):
+                        if m.lower() not in h_dict:
+                            self.store_violation(info, req_bytes, "Missing Mandatory Header", m)
+                            missing.append(m)
+                            violations_count += 1
+                            
+                    # Check Forbidden
+                    forbidden = []
+                    for f in self.compliance_rules.get("forbidden", []):
+                        if f.lower() in h_dict:
+                             self.store_violation(info, req_bytes, "Forbidden Header Present", "%s: %s" % (f, h_dict[f.lower()]))
+                             forbidden.append(f)
+                             violations_count += 1
+                    
+                    if not missing and not forbidden:
+                        self.store_violation(info, req_bytes, "Compliant", "All checks passed")
+                             
+            except Exception as e:
+                self.log("Assessment error: %s" % e)
         
+        # Update Stats UI
+        files_checked = total_endpoints
+        
+        def update_final_ui():
+            msg = "Assessment Complete: Checked %d Endpoints. Found %d Violations" % (files_checked, violations_count)
+            self.comp_stats.setText(msg)
+            self.stats.setText("Assessment Complete.")
+
+        SwingUtilities.invokeLater(update_final_ui)
+
+            
+    def store_violation(self, info, req_bytes, v_type, detail):
         test_id = len(self.generated_tests_data)
         self.generated_tests_data.append({
             "id": test_id,
             "info": info,
-            "request_bytes": final_req,
-            "description": description,
-            "body_str": body_str
+            "request_bytes": req_bytes,
+            "description": "%s: %s" % (v_type, detail)
         })
-        
-        self.test_model.addRow([test_id, info['headers'][0].split(" ")[0], info['url'].getPath(), description])
+        SwingUtilities.invokeLater(lambda: self.test_model.addRow([test_id, info['headers'][0].split(" ")[0], info['url'].getPath(), v_type, detail]))
 
 
     def test_selected(self, event):
@@ -1217,6 +1303,22 @@ class StatusRenderer(DefaultTableCellRenderer):
             c.setForeground(Color.RED)
         elif "Sending" in s:
             c.setForeground(Color.BLUE)
+        else:
+             c.setForeground(Color.BLACK)
+             
+        return c
+
+class ComplianceRenderer(DefaultTableCellRenderer):
+    def getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, col):
+        c = super(ComplianceRenderer, self).getTableCellRendererComponent(table, value, isSelected, hasFocus, row, col)
+        s = str(value)
+        
+        if "Missing" in s:
+            c.setForeground(Color.RED)
+        elif "Forbidden" in s:
+             c.setForeground(Color.ORANGE.darker())
+        elif "Compliant" in s:
+             c.setForeground(Color.decode("#00aa00")) # Green
         else:
              c.setForeground(Color.BLACK)
              
