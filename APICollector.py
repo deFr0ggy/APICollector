@@ -23,15 +23,12 @@ import re
 import csv
 import threading
 import shlex
+from datetime import datetime
 import threading
 import traceback
 from java.awt.datatransfer import DataFlavor
 
 class SimpleYamlParser:
-    """
-    A lightweight, zero-dependency YAML parser for Burp Suite Extensions.
-    Supports basic Swagger/OpenAPI structures (dicts, lists, scalars, folded strings).
-    """
     def __init__(self, text):
         self.lines = [l.rstrip() for l in text.splitlines()]
         self.n = len(self.lines)
@@ -177,7 +174,36 @@ class BurpExtender(IBurpExtender, ITab):
         self.bodies = {}
         self.responses = {}  
         self.api_spec = {} 
-        self.vulns = [] 
+        self.vulns = []
+        self.vulnerabilities = [] 
+        self.endpoint_findings = {}
+        self.modifying_findings = False
+        
+        self.owasp_top_10 = [
+            "API1:2023 Broken Object Level Authorization",
+            "API2:2023 Broken Authentication",
+            "API3:2023 Broken Object Property Level Authorization",
+            "API4:2023 Unrestricted Resource Consumption",
+            "API5:2023 Broken Function Level Authorization",
+            "API6:2023 Unrestricted Access to Sensitive Business Flows",
+            "API7:2023 Server Side Request Forgery",
+            "API8:2023 Security Misconfiguration",
+            "API9:2023 Improper Inventory Management",
+            "API10:2023 Unsafe Consumption of APIs"
+        ]
+        
+        self.remediation_map = {
+            "API1:2023 Broken Object Level Authorization": "Implement fine-grained authorization checks at the data layer for every object accessed via an ID.",
+            "API2:2023 Broken Authentication": "Use standardized auth mechanisms (OAuth2/OIDC), implement rate limiting, and avoid using sensitive data in tokens.",
+            "API3:2023 Broken Object Property Level Authorization": "Enforce schema validation, avoid 'select *', and implement property-level access control on API responses.",
+            "API4:2023 Unrestricted Resource Consumption": "Ensure strict execution timeouts, limit payload sizes, and implement per-user/per-API rate limiting and quotas.",
+            "API5:2023 Broken Function Level Authorization": "Deny access by default. Implement centralized role-based access control (RBAC) for all functions.",
+            "API6:2023 Unrestricted Access to Sensitive Business Flows": "Implement business logic flow validation, device fingerprinting, and behavioral analysis to detect automated abuse.",
+            "API7:2023 Server Side Request Forgery": "Implement a strict allowlist for outgoing traffic and use an isolated network segment for the API.",
+            "API8:2023 Security Misconfiguration": "Disable verbose error messages, remove unnecessary features, and use automated tools to verify security headers.",
+            "API9:2023 Improper Inventory Management": "Maintain updated API documentation (OpenAPI), decommission old versions, and implement environment separation.",
+            "API10:2023 Unsafe Consumption of APIs": "Validate and sanitize data from third-party APIs, implement timeouts/retries, and use secure communication (TLS)."
+        }
         
         self.generated_tests_data = [] 
         
@@ -213,7 +239,7 @@ class BurpExtender(IBurpExtender, ITab):
         self.endpoints_panel = JPanel(BorderLayout())
         
         self.model = DefaultTableModel(
-            ["Domain", "Scheme", "Method", "Path", "Auth", "Risk", "Type", "Status"], 0
+            ["Domain", "Scheme", "Method", "Path", "Auth", "Risk", "Type", "Status", "Vulnerability"], 0
         )
 
         self.table = JTable(self.model)
@@ -223,11 +249,16 @@ class BurpExtender(IBurpExtender, ITab):
         self.table.getColumnModel().getColumn(1).setCellRenderer(SchemeRenderer())
         self.table.getColumnModel().getColumn(2).setCellRenderer(MethodRenderer())
         self.table.getColumnModel().getColumn(7).setCellRenderer(StatusRenderer())
+        self.table.getColumnModel().getColumn(8).setCellRenderer(VulnStatusRenderer())
+        
+        vuln_editor_combo = JComboBox(["Pending", "Vulnerable", "Not Vulnerable"])
+        self.table.getColumnModel().getColumn(8).setCellEditor(javax.swing.DefaultCellEditor(vuln_editor_combo))
 
         self.stats = JLabel("Ready")
         self.endpoints_panel.add(self.stats, BorderLayout.NORTH)
 
-        self.endpoint_tabs = JTabbedPane()
+        self.ep_bottom_tabs = JTabbedPane()
+        
         self.ep_req_area = JTextArea()
         self.ep_req_area.setEditable(True) 
         self.ep_req_area.setLineWrap(True)
@@ -244,10 +275,42 @@ class BurpExtender(IBurpExtender, ITab):
         
         self.ep_detail_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, self.endpoint_req_scroll, self.endpoint_res_scroll)
         self.ep_detail_split.setResizeWeight(0.5)
+        
+        self.ep_bottom_tabs.addTab("Request / Response", self.ep_detail_split)
+        
+        self.findings_panel = JPanel(BorderLayout())
+        
+        class EditableTableModel(DefaultTableModel):
+            def isCellEditable(self, row, column):
+                return column != 4
+                
+        self.findings_model = EditableTableModel(["Severity", "OWASP Category", "Notes", "Remediation", "Date"], 0)
+        self.findings_table = JTable(self.findings_model)
+        
+        severity_col_combo = JComboBox(["Critical", "High", "Medium", "Low", "Info"])
+        self.findings_table.getColumnModel().getColumn(0).setCellEditor(javax.swing.DefaultCellEditor(severity_col_combo))
+        
+        owasp_col_combo = JComboBox(self.owasp_top_10)
+        self.findings_table.getColumnModel().getColumn(1).setCellEditor(javax.swing.DefaultCellEditor(owasp_col_combo))
+        
+        self.findings_model.addTableModelListener(self.on_findings_table_edit)
+        
+        findings_controls = JPanel(FlowLayout(FlowLayout.LEFT))
+        self.vuln_status_dropdown = JComboBox(["Pending", "Vulnerable", "Not Vulnerable"])
+        self.vuln_status_dropdown.addActionListener(self.update_row_vuln_status)
+        findings_controls.add(JLabel("Overall Status:"))
+        findings_controls.add(self.vuln_status_dropdown)
+        findings_controls.add(JButton("Add Finding", actionPerformed=self.add_finding_to_endpoint))
+        findings_controls.add(JButton("Delete Finding", actionPerformed=self.delete_endpoint_finding))
+        
+        self.findings_panel.add(findings_controls, BorderLayout.NORTH)
+        self.findings_panel.add(JScrollPane(self.findings_table), BorderLayout.CENTER)
+        
+        self.ep_bottom_tabs.addTab("Findings", self.findings_panel)
 
         self.ep_split = JSplitPane(JSplitPane.VERTICAL_SPLIT)
         self.ep_split.setTopComponent(JScrollPane(self.table))
-        self.ep_split.setBottomComponent(self.ep_detail_split)
+        self.ep_split.setBottomComponent(self.ep_bottom_tabs)
         self.ep_split.setDividerLocation(300)
 
         controls = JPanel()
@@ -263,6 +326,7 @@ class BurpExtender(IBurpExtender, ITab):
         controls.add(JButton("Clear Data", actionPerformed=self.clear_data))
         controls.add(JButton("Execute (Internal)", actionPerformed=self.send_endpoint_request))
         controls.add(JButton("Reset Request", actionPerformed=self.reset_endpoint_request))
+        controls.add(JButton("Mark as Vulnerable", actionPerformed=self.mark_as_vulnerable))
         controls.add(JButton("Send to Repeater", actionPerformed=self.push_selected))
         controls.add(JButton("Send All to Repeater", actionPerformed=self.push_all))
         controls.add(JButton("Assess Compliance", actionPerformed=self.assess_compliance))
@@ -397,6 +461,58 @@ class BurpExtender(IBurpExtender, ITab):
         self.tabs.addTab("Environment", self.env_panel)
         self.tabs.addTab("Compliance", self.test_manager_panel)
         self.tabs.addTab("Parameters", self.param_panel)
+        
+        self.vuln_panel = JPanel(BorderLayout())
+        
+        vuln_tools = JPanel()
+        vuln_tools.add(JButton("Add Vulnerability", actionPerformed=self.add_vulnerability))
+        vuln_tools.add(JButton("Delete Selected", actionPerformed=self.delete_vulnerability))
+        vuln_tools.add(JButton("Export CSV", actionPerformed=self.export_vulns_csv))
+        vuln_tools.add(JButton("Export Markdown", actionPerformed=self.export_vulns_markdown))
+        vuln_tools.add(JButton("Export JSON", actionPerformed=self.export_vulns_json))
+        
+        self.vuln_panel.add(vuln_tools, BorderLayout.NORTH)
+        
+        self.vuln_model = DefaultTableModel(["ID", "Severity", "Type", "Endpoint", "Status", "Date"], 0)
+        self.vuln_table = JTable(self.vuln_model)
+        self.vuln_table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
+        self.vuln_table.getSelectionModel().addListSelectionListener(self.vuln_selected)
+        
+        self.vuln_table.getColumnModel().getColumn(1).setCellRenderer(SeverityRenderer())
+        
+        vuln_detail_panel = JPanel(BorderLayout())
+        vuln_detail_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
+        
+        self.vuln_req_area = JTextArea()
+        self.vuln_req_area.setEditable(False)
+        self.vuln_req_area.setLineWrap(True)
+        self.vuln_req_area.setWrapStyleWord(True)
+        self.vuln_req_area.setFont(Font("Monospaced", Font.PLAIN, 11))
+        
+        self.vuln_resp_area = JTextArea()
+        self.vuln_resp_area.setEditable(False)
+        self.vuln_resp_area.setLineWrap(True)
+        self.vuln_resp_area.setWrapStyleWord(True)
+        self.vuln_resp_area.setFont(Font("Monospaced", Font.PLAIN, 11))
+        
+        vuln_detail_split.setLeftComponent(JScrollPane(self.vuln_req_area))
+        vuln_detail_split.setRightComponent(JScrollPane(self.vuln_resp_area))
+        vuln_detail_split.setResizeWeight(0.5)
+        
+        self.vuln_notes_area = JTextArea(4, 20)
+        self.vuln_notes_area.setEditable(False)
+        self.vuln_notes_area.setLineWrap(True)
+        self.vuln_notes_area.setWrapStyleWord(True)
+        
+        vuln_detail_panel.add(vuln_detail_split, BorderLayout.CENTER)
+        vuln_detail_panel.add(JScrollPane(self.vuln_notes_area), BorderLayout.SOUTH)
+        
+        vuln_main_split = JSplitPane(JSplitPane.VERTICAL_SPLIT, JScrollPane(self.vuln_table), vuln_detail_panel)
+        vuln_main_split.setDividerLocation(250)
+        
+        self.vuln_panel.add(vuln_main_split, BorderLayout.CENTER)
+        
+        self.tabs.addTab("Vulnerabilities", self.vuln_panel)
 
         self.main_panel.add(self.tabs, BorderLayout.CENTER)
 
@@ -535,7 +651,7 @@ class BurpExtender(IBurpExtender, ITab):
             
             risk = self.risk(method, auth)
             
-            self.model.addRow([domain, scheme, method, path, auth, risk, "cURL", ""])
+            self.model.addRow([domain, scheme, method, path, auth, risk, "cURL", "", "Pending"])
             
             if body:
                 self.bodies[self.model.getRowCount() - 1] = body
@@ -571,6 +687,9 @@ class BurpExtender(IBurpExtender, ITab):
             self.api_spec = {}
             self.postman_item_count = 0
             self.generated_tests_data = [] 
+            self.vulnerabilities = []
+            self.endpoint_findings = {}
+            self.vuln_model.setRowCount(0)
             self.test_model.setRowCount(0)
             self.param_model.setRowCount(0)
             
@@ -584,6 +703,9 @@ class BurpExtender(IBurpExtender, ITab):
             
             self.ep_req_area.setText("")
             self.ep_res_area.setText("")
+            self.vuln_req_area.setText("")
+            self.vuln_resp_area.setText("")
+            self.vuln_notes_area.setText("")
         
         self.env_model.setRowCount(0)
         self.env_host.setText("")
@@ -768,7 +890,7 @@ class BurpExtender(IBurpExtender, ITab):
             
             risk = self.risk(verb, auth)
 
-            self.model.addRow([domain, scheme, verb, path, auth, risk, "Postman", ""])
+            self.model.addRow([domain, scheme, verb, path, auth, risk, "Postman", "", "Pending"])
 
             body = None
             if req.get("body"):
@@ -867,7 +989,7 @@ class BurpExtender(IBurpExtender, ITab):
                     
                     risk = self.risk(verb, auth)
                     
-                    self.model.addRow([domain, scheme, verb, r_path, auth, risk, "OpenAPI", ""])
+                    self.model.addRow([domain, scheme, verb, r_path, auth, risk, "OpenAPI", "", "Pending"])
                     
                     body = None
                     req_params = []
@@ -1217,7 +1339,7 @@ class BurpExtender(IBurpExtender, ITab):
                 
                 if resp:
                     r_info = self.helpers.analyzeResponse(resp)
-                    headers = r_info.getHeaders() #
+                    headers = r_info.getHeaders() 
                     
                     h_dict = {}
                     for h in headers:
@@ -1444,6 +1566,10 @@ class BurpExtender(IBurpExtender, ITab):
             
         row = self.table.getSelectedRow()
         if row >= 0:
+            status = self.model.getValueAt(row, 8)
+            self.vuln_status_dropdown.setSelectedItem(status if status else "Pending")
+            self._sync_findings_table(row)
+            
             if row in self.responses:
                 cached = self.responses[row]
                 self.ep_req_area.setText(cached['request'])
@@ -1458,6 +1584,119 @@ class BurpExtender(IBurpExtender, ITab):
             
             if self.autoScan.isSelected():
                 self.send_to_repeater(row)
+
+    def _sync_findings_table(self, row):
+        self.modifying_findings = True
+        self.findings_model.setRowCount(0)
+        findings = self.endpoint_findings.get(row, [])
+        for f in findings:
+            self.findings_model.addRow([f['severity'], f['owasp'], f['notes'], f.get('remediation', ''), f['date']])
+        self.modifying_findings = False
+
+    def on_findings_table_edit(self, event):
+        if self.modifying_findings:
+            return
+            
+        row = self.table.getSelectedRow()
+        if row < 0:
+            return
+            
+        f_row = event.getFirstRow()
+        if f_row < 0 or f_row >= self.findings_model.getRowCount():
+            return
+            
+        findings = self.endpoint_findings.get(row, [])
+        if f_row < len(findings):
+            old_owasp = findings[f_row]['owasp']
+            findings[f_row]['severity'] = self.findings_model.getValueAt(f_row, 0)
+            findings[f_row]['owasp'] = self.findings_model.getValueAt(f_row, 1)
+            findings[f_row]['notes'] = self.findings_model.getValueAt(f_row, 2)
+            findings[f_row]['remediation'] = self.findings_model.getValueAt(f_row, 3)
+            
+            if findings[f_row]['owasp'] != old_owasp:
+                new_remedy = self.remediation_map.get(findings[f_row]['owasp'], "")
+                if not findings[f_row]['remediation'] or findings[f_row]['remediation'] == self.remediation_map.get(old_owasp, ""):
+                    findings[f_row]['remediation'] = new_remedy
+                    self.findings_model.setValueAt(new_remedy, f_row, 3)
+
+            self._rebuild_global_vulnerabilities()
+
+    def _rebuild_global_vulnerabilities(self):
+        self.vulnerabilities = []
+        self.vuln_model.setRowCount(0)
+        
+        vuln_id = 1
+        for r in range(self.model.getRowCount()):
+            findings = self.endpoint_findings.get(r, [])
+            endpoint = "%s %s" % (self.model.getValueAt(r, 2), self.model.getValueAt(r, 3))
+            
+            for f in findings:
+                global_vuln = {
+                    'id': vuln_id,
+                    'severity': f['severity'],
+                    'type': f['owasp'],
+                    'endpoint': endpoint,
+                    'status': "Confirmed",
+                    'date': f['date'],
+                    'request': f['request'],
+                    'response': f['response'],
+                    'notes': f['notes'],
+                    'remediation': f.get('remediation', '')
+                }
+                self.vulnerabilities.append(global_vuln)
+                self.vuln_model.addRow([
+                    vuln_id, global_vuln['severity'], global_vuln['type'], 
+                    global_vuln['endpoint'], global_vuln['status'], global_vuln['date']
+                ])
+                vuln_id += 1
+
+    def update_row_vuln_status(self, event):
+        row = self.table.getSelectedRow()
+        if row >= 0:
+            status = self.vuln_status_dropdown.getSelectedItem()
+            if self.model.getValueAt(row, 8) != status:
+                self.model.setValueAt(status, row, 8)
+
+    def add_finding_to_endpoint(self, event):
+        row = self.table.getSelectedRow()
+        if row < 0:
+            self.stats.setText("Select an endpoint first.")
+            return
+            
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        finding = {
+            'severity': "Medium",
+            'owasp': self.owasp_top_10[0],
+            'notes': "Add PoC details here...",
+            'remediation': self.remediation_map.get(self.owasp_top_10[0], ""),
+            'date': now,
+            'request': self.ep_req_area.getText(),
+            'response': self.ep_res_area.getText()
+        }
+        
+        if row not in self.endpoint_findings:
+            self.endpoint_findings[row] = []
+        self.endpoint_findings[row].append(finding)
+        
+        if self.model.getValueAt(row, 8) != "Vulnerable":
+            self.model.setValueAt("Vulnerable", row, 8)
+            self.vuln_status_dropdown.setSelectedItem("Vulnerable")
+        
+        self._sync_findings_table(row)
+        self._rebuild_global_vulnerabilities()
+        self.stats.setText("Finding added. Edit inline below.")
+
+    def delete_endpoint_finding(self, event):
+        row = self.table.getSelectedRow()
+        f_row = self.findings_table.getSelectedRow()
+        if row >= 0 and f_row >= 0:
+            confirm = JOptionPane.showConfirmDialog(None, "Delete this finding?", "Confirm", JOptionPane.YES_NO_OPTION)
+            if confirm == JOptionPane.YES_OPTION:
+                del self.endpoint_findings[row][f_row]
+                self._sync_findings_table(row)
+                if not self.endpoint_findings[row]:
+                    self.model.setValueAt("Not Vulnerable", row, 8)
+                    self.vuln_status_dropdown.setSelectedItem("Not Vulnerable")
 
     def send_endpoint_request(self, event):
         row = self.table.getSelectedRow()
@@ -1560,6 +1799,226 @@ class BurpExtender(IBurpExtender, ITab):
                 self.stats.setText("Request reset to original.")
 
 
+    def mark_as_vulnerable(self, event):
+        row = self.table.getSelectedRow()
+        if row < 0:
+            self.stats.setText("Select an endpoint first.")
+            return
+            
+        request = self.ep_req_area.getText()
+        response = self.ep_res_area.getText()
+        
+        if not response:
+            confirm = JOptionPane.showConfirmDialog(None, 
+                "No response captured yet. Do you want to mark it as vulnerable without response evidence?",
+                "Missing Evidence", JOptionPane.YES_NO_OPTION)
+            if confirm != JOptionPane.YES_OPTION:
+                return
+        
+        endpoint = "%s %s" % (self.model.getValueAt(row, 2), self.model.getValueAt(row, 3))
+        self._show_vuln_dialog(endpoint, request, response)
+
+    def add_vulnerability(self, event):
+        self._show_vuln_dialog("", "", "")
+
+    def _show_vuln_dialog(self, endpoint, request, response):
+        dialog_panel = JPanel(GridLayout(0, 1, 5, 5))
+        
+        dialog_panel.add(JLabel("Endpoint:"))
+        endpoint_field = JTextField(endpoint)
+        dialog_panel.add(endpoint_field)
+        
+        dialog_panel.add(JLabel("Severity:"))
+        severity_box = JComboBox(["Critical", "High", "Medium", "Low", "Info"])
+        dialog_panel.add(severity_box)
+        
+        dialog_panel.add(JLabel("OWASP API Top 10 Category:"))
+        category_box = JComboBox(self.owasp_top_10)
+        dialog_panel.add(category_box)
+        
+        dialog_panel.add(JLabel("Status:"))
+        status_box = JComboBox(["New", "Confirmed", "False Positive", "Remediated"])
+        dialog_panel.add(status_box)
+        
+        dialog_panel.add(JLabel("Notes / Proof of Concept:"))
+        notes_area = JTextArea(5, 20)
+        dialog_panel.add(JScrollPane(notes_area))
+        
+        result = JOptionPane.showConfirmDialog(None, dialog_panel, "Add Vulnerability", JOptionPane.OK_CANCEL_OPTION)
+        
+        if result == JOptionPane.OK_OPTION:
+            vuln_id = len(self.vulnerabilities) + 1
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            
+            vuln_data = {
+                'id': vuln_id,
+                'severity': severity_box.getSelectedItem(),
+                'type': category_box.getSelectedItem(),
+                'endpoint': endpoint_field.getText(),
+                'status': status_box.getSelectedItem(),
+                'date': now,
+                'request': request,
+                'response': response,
+                'notes': notes_area.getText(),
+                'remediation': self.remediation_map.get(category_box.getSelectedItem(), "")
+            }
+            
+            self.vulnerabilities.append(vuln_data)
+            self.vuln_model.addRow([
+                vuln_id, 
+                vuln_data['severity'],
+                vuln_data['type'],
+                vuln_data['endpoint'],
+                vuln_data['status'],
+                vuln_data['date']
+            ])
+            self.stats.setText("Vulnerability added to tracker.")
+
+    def delete_vulnerability(self, event):
+        row = self.vuln_table.getSelectedRow()
+        if row >= 0:
+            confirm = JOptionPane.showConfirmDialog(None, "Are you sure you want to delete this finding?", "Confirm Deletion", JOptionPane.YES_NO_OPTION)
+            if confirm == JOptionPane.YES_OPTION:
+                del self.vulnerabilities[row]
+                self.vuln_model.removeRow(row)
+                self.vuln_req_area.setText("")
+                self.vuln_resp_area.setText("")
+                self.vuln_notes_area.setText("")
+
+    def vuln_selected(self, event):
+        if event.getValueIsAdjusting(): return
+        row = self.vuln_table.getSelectedRow()
+        if row >= 0:
+            vuln = self.vulnerabilities[row]
+            self.vuln_req_area.setText(vuln['request'])
+            self.vuln_resp_area.setText(vuln['response'])
+            self.vuln_notes_area.setText("Notes:\n%s\n\nRemediation Recommendation:\n%s" % (vuln['notes'], vuln.get('remediation', 'N/A')))
+
+    def export_vulns_csv(self, event):
+        assessed_rows = []
+        for r in range(self.model.getRowCount()):
+            status = self.model.getValueAt(r, 8)
+            if status in ["Vulnerable", "Not Vulnerable"]:
+                assessed_rows.append(r)
+                
+        if not assessed_rows and not self.vulnerabilities:
+            self.stats.setText("No assessed endpoints to export.")
+            return
+            
+        chooser = JFileChooser()
+        chooser.setSelectedFile(java.io.File("api_assessment_report.csv"))
+        if chooser.showSaveDialog(None) == JFileChooser.APPROVE_OPTION:
+            file_path = chooser.getSelectedFile().getAbsolutePath()
+            with open(file_path, 'wb') as f:
+                writer = csv.writer(f)
+                writer.writerow(["ID", "Severity", "Type/Category", "Endpoint", "Status", "Date", "Notes", "Remediation", "Request", "Response"])
+                
+                for v in self.vulnerabilities:
+                    writer.writerow([
+                        v['id'], v['severity'], v['type'], v['endpoint'], v['status'], v['date'],
+                        v['notes'].encode('utf-8'), v.get('remediation', '').encode('utf-8'),
+                        v['request'].encode('utf-8'), v['response'].encode('utf-8')
+                    ])
+                
+                for r in assessed_rows:
+                    status = self.model.getValueAt(r, 8)
+                    if status == "Not Vulnerable":
+                        endpoint = "%s %s" % (self.model.getValueAt(r, 2), self.model.getValueAt(r, 3))
+                        cached = self.responses.get(r, {'request': '', 'response': ''})
+                        writer.writerow([
+                            "-", "Info", "Safe Endpoint", endpoint, "Not Vulnerable", "-", 
+                            "No vulnerabilities observed.", cached['request'].encode('utf-8'), cached['response'].encode('utf-8')
+                        ])
+            self.stats.setText("Assessment exported to CSV.")
+
+    def export_vulns_markdown(self, event):
+        vulnerable_findings = self.vulnerabilities
+        not_vulnerable_endpoints = []
+        for r in range(self.model.getRowCount()):
+            if self.model.getValueAt(r, 8) == "Not Vulnerable":
+                endpoint = "%s %s" % (self.model.getValueAt(r, 2), self.model.getValueAt(r, 3))
+                not_vulnerable_endpoints.append({
+                    'endpoint': endpoint,
+                    'cached': self.responses.get(r, {'request': 'N/A', 'response': 'N/A'})
+                })
+                
+        if not vulnerable_findings and not not_vulnerable_endpoints:
+            self.stats.setText("No assessed endpoints to export.")
+            return
+            
+        chooser = JFileChooser()
+        chooser.setSelectedFile(java.io.File("api_security_report.md"))
+        if chooser.showSaveDialog(None) == JFileChooser.APPROVE_OPTION:
+            file_path = chooser.getSelectedFile().getAbsolutePath()
+            with open(file_path, 'w') as f:
+                f.write("# API Security Assessment Report\n\n")
+                f.write("Generated on: %s\n\n" % datetime.now().strftime("%Y-%m-%d %H:%M"))
+                
+                f.write("## Executive Summary\n")
+                f.write("This report provides a comprehensive overview of the API security assessment, including both identified vulnerabilities and verified safe endpoints.\n\n")
+                
+                f.write("Total Vulnerabilities Discovered: **%d**\n" % len(vulnerable_findings))
+                f.write("Total Endpoints Verified Safe: **%d**\n\n" % len(not_vulnerable_endpoints))
+
+                if vulnerable_findings:
+                    f.write("## Vulnerabilities Overview\n\n")
+                    f.write("| ID | Severity | Category | Endpoint | Status |\n")
+                    f.write("|----|----------|----------|----------|--------|\n")
+                    for v in vulnerable_findings:
+                        f.write("| %s | %s | %s | %s | %s |\n" % (v['id'], v['severity'], v['type'], v['endpoint'], v['status']))
+                    f.write("\n")
+
+                if not_vulnerable_endpoints:
+                    f.write("## Verified Safe Endpoints\n\n")
+                    f.write("| Endpoint | Result |\n")
+                    f.write("|----------|--------|\n")
+                    for v in not_vulnerable_endpoints:
+                        f.write("| %s | Not Vulnerable |\n" % v['endpoint'])
+                    f.write("\n")
+                
+                f.write("---\n\n")
+                
+                if vulnerable_findings:
+                    f.write("## Detailed Vulnerabilities\n\n")
+                    for v in vulnerable_findings:
+                        f.write("### %s. %s - %s\n\n" % (v['id'], v['type'], v['endpoint']))
+                        f.write("- **Severity:** %s\n" % v['severity'])
+                        f.write("- **Status:** %s\n" % v['status'])
+                        f.write("- **Date:** %s\n" % v['date'])
+                        f.write("\n#### Description & Notes\n%s\n" % v['notes'].encode('utf-8'))
+                        f.write("\n#### Remediation Recommendation\n%s\n" % v.get('remediation', 'N/A').encode('utf-8'))
+                        f.write("\n#### Evidence (PoC)\n")
+                        f.write("\n**Request:**\n```http\n%s\n```\n" % v['request'].encode('utf-8'))
+                        f.write("\n**Response:**\n```http\n%s\n```\n" % v['response'].encode('utf-8'))
+                        f.write("\n---\n\n")
+
+                if not_vulnerable_endpoints:
+                    f.write("## Safe Endpoint Details\n\n")
+                    for v in not_vulnerable_endpoints:
+                        f.write("### [SAFE] %s\n\n" % v['endpoint'])
+                        f.write("Assessment Result: **Not Vulnerable**\n\n")
+                        f.write("#### Evidence (Verified Traffic)\n")
+                        f.write("\n**Request:**\n```http\n%s\n```\n" % v['cached']['request'].encode('utf-8'))
+                        f.write("\n**Response:**\n```http\n%s\n```\n" % v['cached']['response'].encode('utf-8'))
+                        f.write("\n---\n\n")
+                    
+            self.stats.setText("Markdown report exported.")
+
+    def export_vulns_json(self, event):
+        if not self.vulnerabilities:
+            self.stats.setText("No vulnerabilities to export.")
+            return
+            
+        chooser = JFileChooser()
+        chooser.setSelectedFile(java.io.File("api_vulnerabilities.json"))
+        if chooser.showSaveDialog(None) == JFileChooser.APPROVE_OPTION:
+            file_path = chooser.getSelectedFile().getAbsolutePath()
+            with open(file_path, 'w') as f:
+                json.dump(self.vulnerabilities, f, indent=2)
+            self.stats.setText("Vulnerabilities exported to JSON.")
+
+
+
     def insomnia_auth(self, r):
         a = r.get("authentication")
         if not a or not a.get("type"):
@@ -1638,6 +2097,43 @@ class StatusRenderer(DefaultTableCellRenderer):
         else:
              c.setForeground(Color.BLACK)
              
+        return c
+
+class VulnStatusRenderer(DefaultTableCellRenderer):
+    def getTableCellRendererComponent(self, table, value, isSelected, hasFocus, row, col):
+        c = super(VulnStatusRenderer, self).getTableCellRendererComponent(table, value, isSelected, hasFocus, row, col)
+        s = str(value)
+        
+        if s == "Vulnerable":
+            c.setForeground(Color.RED)
+            c.setFont(c.getFont().deriveFont(Font.BOLD))
+        elif s == "Not Vulnerable":
+            c.setForeground(Color.decode("#00aa00"))
+        else:
+            c.setForeground(Color.GRAY)
+            
+        return c
+
+class SeverityRenderer(DefaultTableCellRenderer):
+    def getTableCellRendererComponent(self, table, value, isSelected,  hasFocus, row, col):
+        c = super(SeverityRenderer, self).getTableCellRendererComponent(table, value, isSelected, hasFocus, row, col)
+        s = str(value).upper()
+        
+        if "CRITICAL" in s:
+            c.setForeground(Color.RED)
+            c.setFont(c.getFont().deriveFont(Font.BOLD))
+        elif "HIGH" in s:
+            c.setForeground(Color.ORANGE.darker())
+            c.setFont(c.getFont().deriveFont(Font.BOLD))
+        elif "MEDIUM" in s:
+            c.setForeground(Color.ORANGE)
+        elif "LOW" in s:
+            c.setForeground(Color.BLUE)
+        elif "INFO" in s:
+            c.setForeground(Color.GRAY)
+        else:
+            c.setForeground(Color.BLACK)
+            
         return c
 
 class ComplianceRenderer(DefaultTableCellRenderer):
