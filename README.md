@@ -7,7 +7,7 @@ Whether you are performing a quick manual assessment or a full-scale API complia
 
 ---
 
-## � Core Workflow
+## 🔄 Core Workflow
 
 APICollector is built around a logical flow from discovery to delivery:
 
@@ -43,7 +43,7 @@ APICollector is built around a logical flow from discovery to delivery:
 
 ---
 
-## � Getting Started
+## 🚀 Getting Started
 
 1.  Download the `APICollector.py` file.
 2.  In Burp Suite, go to the **Extensions** tab -> **Installed** -> **Add**.
