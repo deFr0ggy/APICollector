@@ -4,90 +4,159 @@
 
 ## 🚀 Key Features
 
+### Import & Parsing
 *   **Universal Import**: Seamlessly import API definitions from:
     *   **Insomnia** (JSON Export)
     *   **Postman Collections** (v2.1 JSON)
-    *   **OpenAPI / Swagger** (JSON & YAML)
+    *   **OpenAPI / Swagger** (v2.0 & v3.0 - JSON & YAML)
     *   **cURL Commands** (Paste directly from clipboard)
-*   **Security Dashboard**: Instant static analysis of imported endpoints against **OWASP API Security Top 10 (2023)**.
-    *   Identifies authentication gaps, BOLA risks, sensitive keywords, and unsafe methods.
-    *   Clickable links navigate directly to the risky endpoint.
-*   **Interactive Endpoints Table**:
-    *   **Live Status**: See real-time HTTP status codes (200 OK, 403 Forbidden) as you test.
-    *   **Risk Highlighting**: Risky HTTP verbs (DELETE, PUT) and missing auth are highlighted.
-    *   **Multi-Select**: Shift+Click / Ctrl+Click to manage multiple endpoints.
-    *   **Editable Requests**: Modify headers/bodies on the fly before sending.
-*   **Compliance Manager**:
-    *   Automated checking of **Security Headers** (e.g., `HSTS`, `Content-Security-Policy`).
-    *   **Custom Rules**: Save/Load JSON rules to define **Mandatory** and **Forbidden** headers for your organization.
-    *   **Visual Reporting**: Clear Red/Orange/Green indicators for compliance status.
-*   **Environment Manager**:
-    *   Global search/replace for variables (Host, Port, Scheme).
-    *   Bulk update endpoints to point to a new internal/staging server.
-*   **Parameter Analysis**:
-    *   Auto-extraction of parameters from Request/Response schemas.
-    *   Helps identify hidden parameters for fuzzing.
+*   **Zero Dependencies**: Embedded YAML parser - no external libraries required
+*   **Variable Resolution**: Automatic resolution of Postman/Insomnia variables (`{{baseUrl}}`, `{{_.variable}}`)
+*   **Order Preservation**: APIs display in the same order as your source file
+
+### Security Dashboard
+*   Instant static analysis against **OWASP API Security Top 10 (2023)**
+*   Identifies authentication gaps, BOLA risks, sensitive keywords, and unsafe methods
+*   Clickable links navigate directly to risky endpoints
+
+### Interactive Endpoints Table
+*   **Live Status**: Real-time HTTP status codes (200 OK, 403 Forbidden) as you test
+*   **Risk Highlighting**: Risky HTTP verbs (DELETE, PUT) and missing auth highlighted
+*   **Multi-Select**: Shift+Click / Ctrl+Click to manage multiple endpoints
+*   **Editable Requests**: Modify headers/bodies on the fly with **Undo/Redo support (Ctrl+Z / Ctrl+Y)**
+*   **Word Wrap**: Request and Response text areas support line wrapping for better readability
+*   **Execute Internal**: Send requests directly from the extension without leaving Burp
+
+### Compliance Manager
+*   **Automated Checking**: Test security headers (`HSTS`, `Content-Security-Policy`, etc.)
+*   **Custom Rules**: Save/Load JSON rules for **Mandatory** and **Forbidden** headers
+*   **Visual Reporting**: Clear Red/Orange/Green indicators
+*   **Path Grouping**: Endpoints organized by functional area (e.g., `users`, `auth`, `products`)
+*   **Response Display**: View the actual server response that triggered each violation
+*   **CSV Export**: Export compliance results including full Request/Response data for offline analysis
+
+### Environment Manager
+*   Global search/replace for variables (Host, Port, Scheme)
+*   Bulk update endpoints to point to new servers (internal/staging/production)
+
+### Parameter Analysis
+*   Auto-extraction of parameters from Request/Response schemas
+*   Helps identify hidden parameters for fuzzing
 
 ---
 
 ## 🛠 Installation
 
-1.  **Requirements**: Burp Suite (Community or Professional), Jython Standalone JAR (`jython-standalone-2.7.x.jar`).
+1.  **Requirements**: 
+    *   Burp Suite (Community or Professional)
+    *   Jython Standalone JAR (`jython-standalone-2.7.x.jar`)
 2.  **Setup Jython**:
-    *   Go to **Extensions** -> **Extensions Settings**.
-    *   Under **Python Environment**, select your `jython-standalone.jar`.
+    *   Go to **Extensions** -> **Extensions Settings**
+    *   Under **Python Environment**, select your `jython-standalone.jar`
 3.  **Load Extension**:
-    *   Go to **Extensions** -> **Installed**.
-    *   Click **Add**.
-    *   Select **Extension type**: `Python`.
-    *   Select the `APICollector.py` file.
+    *   Go to **Extensions** -> **Installed**
+    *   Click **Add**
+    *   Select **Extension type**: `Python`
+    *   Select the `APICollector.py` file
 
 ---
 
 ## 📖 Step-by-Step Usage
 
 ### 1. Importing APIs
-*   **File Import**: Click **Import API** and select your Insomnia/Postman/OpenAPI file.
-*   **Clipboard**: Copy a cURL command and click **Paste cURL** to add it instantly.
-*   *Note: If "Environment" variables are used in the file (e.g., `{{base_url}}`), use the **Environment Tab** to resolve them.*
+*   **File Import**: Click **Import API** and select your Insomnia/Postman/OpenAPI file (JSON or YAML)
+*   **Clipboard**: Copy a cURL command and click **Paste cURL** to add it instantly
+*   *Note: Collection variables are automatically loaded and resolved (e.g., `{{baseUrl}}`).*
 
 ### 2. Static Analysis (Dashboard)
-*   Immediately after import, switch to the **Dashboard** tab.
-*   Review potential risks (e.g., "Broken Object Level Authorization").
-*   Click any link (e.g., `GET /users/{id}`) to jump to that endpoint in the main table.
+*   Immediately after import, switch to the **Dashboard** tab
+*   Review potential risks (e.g., "Broken Object Level Authorization")
+*   Click any link (e.g., `GET /users/{id}`) to jump to that endpoint in the main table
 
 ### 3. Executing Requests (Endpoints Tab)
-*   **Select**: Click an endpoint in the table. Use **Shift+Click** for multiple.
-*   **Edit**: View the **Request** pane at the bottom. You can edit the path, headers, or body.
-    *   *Tip: Click **Reset Request** if you make a mistake.*
+*   **Select**: Click an endpoint in the table. Use **Shift+Click** for multiple
+*   **Edit**: View the **Request** pane at the bottom. You can edit the path, headers, or body
+    *   **Undo/Redo**: Press **Ctrl+Z** to undo changes, **Ctrl+Y** to redo
+    *   *Tip: Click **Reset Request** if you want to restore the original.*
 *   **Send**:
-    *   **Execute (Internal)**: Sends the request from the extension. The response status updates in the table (Green for 2xx, Red for 4xx/5xx).
-    *   **Send to Repeater**: Pushes the selected request(s) to Burp's Repeater tool for manual testing.
-*   **Filter**: Use the "Verb Filter" dropdown to show only `POST` or `DELETE` requests.
+    *   **Execute (Internal)**: Sends the request from the extension. The response status updates in the table (Green for 2xx, Red for 4xx/5xx)
+    *   **Send to Repeater**: Pushes the selected request(s) to Burp's Repeater tool for manual testing
+*   **Filter**: Use the "Verb Filter" dropdown to show only `POST` or `DELETE` requests
 
 ### 4. Auditing Compliance (Compliance Tab)
 Replace manual header checks with the auto-assessor.
-1.  **Switch to Compliance Tab**.
-2.  **Configure Rules**:
-    *   Click **Save Sample Rules** to get a template.
-    *   Edit the JSON to define your `mandatory` (must have) and `forbidden` (must not have) headers.
-    *   Click **Load Rules** to apply them. (Defaults are provided if you skip this).
-3.  **Run Assessment**:
-    *   Select endpoints in the **Endpoints** tab (or all).
-    *   Click **Assess Compliance**.
-    *   The tool sends live requests and analyzes the response headers.
-4.  **Review Results**:
-    *   **Red**: Missing Mandatory Header (e.g., No `Strict-Transport-Security`).
-    *   **Orange**: Forbidden Header Found (e.g., `Server: nginx` leaking info).
-    *   **Green**: Fully compliant.
+
+1.  **Configure Rules**:
+    *   Click **Save Sample Rules** to get a template
+    *   Edit the JSON to define your `mandatory` (must have) and `forbidden` (must not have) headers
+    *   Click **Load Rules** to apply them (Defaults are provided if you skip this)
+
+2.  **Run Assessment**:
+    *   Select endpoints in the **Endpoints** tab (or all)
+    *   Click **Assess Compliance**
+    *   The tool sends live requests and analyzes the response headers
+
+3.  **Review Results**:
+    *   **Group Column**: Endpoints are grouped by functional area for easy navigation
+    *   **Red**: Missing Mandatory Header (e.g., No `Strict-Transport-Security`)
+    *   **Orange**: Forbidden Header Found (e.g., `Server: nginx` leaking info)
+    *   **Green**: Fully compliant
+    *   **Click any row**: View the full Request and Response in the bottom pane
+
+4.  **Export Results**:
+    *   Click **Export CSV** to save all compliance findings
+    *   CSV includes: ID, Group, Method, Path, Violation, Detail, full Request, and full Response
 
 ### 5. Managing Environment
-*   Switch to the **Environment** tab.
-*   **Bulk Edit**: Enter a new Host/Port (e.g., `localhost:8080`) and click **Apply Changes**.
-*   This updates all imported endpoints to target the new server.
+*   Switch to the **Environment** tab
+*   **Bulk Edit**: Enter a new Host/Port (e.g., `localhost:8080`) and click **Apply Changes**
+*   This updates all imported endpoints to target the new server
 
 ---
 
 ## 🧹 Data Management
-*   **Clear Data**: Resets all tables and analysis.
-    *   *Includes a safety confirmation dialog to prevent accidental loss.*
+*   **Clear Data**: Resets all tables and analysis
+    *   *Includes a safety confirmation dialog to prevent accidental loss*
+
+---
+
+## 🎯 Tips & Tricks
+
+*   **Word Wrap**: Long request/response lines automatically wrap for better readability
+*   **Undo/Redo**: Edit requests freely - you can always undo with Ctrl+Z
+*   **Grouping**: Use the Group column in Compliance tab to quickly find all violations for a specific API area
+*   **CSV Export**: Share compliance reports with your team or import into Excel for further analysis
+*   **Thread Safety**: All UI operations are thread-safe - the extension won't freeze during bulk operations
+
+---
+
+## 📝 Recent Improvements
+
+*   ✅ Unified OpenAPI/Swagger support (v2.0 & v3.0)
+*   ✅ Fixed Postman variable resolution
+*   ✅ Embedded YAML parser (zero dependencies)
+*   ✅ Preserved API definition order
+*   ✅ Fixed "Execute Internal" UI freeze
+*   ✅ Added word wrap to text areas
+*   ✅ Enhanced Compliance features (Response display, Path grouping, CSV export)
+*   ✅ Undo/Redo support (Ctrl+Z / Ctrl+Y)
+*   ✅ Clear Data confirmation dialog
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit issues or pull requests.
+
+---
+
+## 📄 License
+
+This project is released under the MIT License.
+
+---
+
+## 🔗 Links
+
+*   **OWASP API Security Top 10**: https://owasp.org/API-Security/
+*   **Burp Suite**: https://portswigger.net/burp

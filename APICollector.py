@@ -3,28 +3,167 @@ import java.io.File
 import javax.swing.border
 from burp import IBurpExtender, ITab
 from javax.swing import (
-    JPanel, JButton, JTable, JScrollPane, JFileChooser,
-    JCheckBox, JComboBox, JLabel, ListSelectionModel,
-    JTabbedPane, JTextArea, JSplitPane, JEditorPane,
-    JTextField, JOptionPane, BorderFactory, SwingUtilities
+    JTabbedPane, JPanel, JLabel, JTable, JScrollPane, JSplitPane,
+    JTextField, JTextArea, JButton, JComboBox, JCheckBox, JFileChooser,
+    BorderFactory, JOptionPane, SwingUtilities, ListSelectionModel,
+    JEditorPane, KeyStroke, AbstractAction
 )
-from javax.swing.table import DefaultTableModel
-from java.awt import BorderLayout
-from javax.swing.event import HyperlinkListener, HyperlinkEvent
-from javax.swing.event import HyperlinkListener, HyperlinkEvent
 from javax.swing.table import DefaultTableModel, DefaultTableCellRenderer
-from java.awt import BorderLayout, GridLayout, Color, Font
+from javax.swing.event import ListSelectionListener, HyperlinkListener, DocumentListener, UndoableEditListener
+from javax.swing.undo import UndoManager
+from java.awt import BorderLayout, FlowLayout, Font, Color, Dimension, GridLayout, GridBagLayout, GridBagConstraints, Toolkit, KeyboardFocusManager
+from java.awt.datatransfer import Clipboard, StringSelection, DataFlavor
+from java.awt.event import ActionListener, ActionEvent, KeyEvent, InputEvent
 from java.awt import Rectangle
 from java.net import URL
 from java.lang import Boolean
 import json
+from collections import OrderedDict
 import re
+import csv
 import threading
 import shlex
 import threading
 import traceback
-from java.awt import Toolkit
 from java.awt.datatransfer import DataFlavor
+
+class SimpleYamlParser:
+    """
+    A lightweight, zero-dependency YAML parser for Burp Suite Extensions.
+    Supports basic Swagger/OpenAPI structures (dicts, lists, scalars, folded strings).
+    """
+    def __init__(self, text):
+        self.lines = [l.rstrip() for l in text.splitlines()]
+        self.n = len(self.lines)
+        self.i = 0
+
+    @staticmethod
+    def parse(text):
+        parser = SimpleYamlParser(text)
+        return parser._parse_block(0)
+
+    def _peek(self):
+        while self.i < self.n:
+            line = self.lines[self.i]
+            if not line.strip() or line.strip().startswith("#"):
+                self.i += 1
+                continue
+            return line
+        return None
+
+    def _get_indent(self, line):
+        return len(line) - len(line.lstrip())
+
+    def _parse_block(self, min_indent):
+        line = self._peek()
+        if not line: return {}
+        
+        indent = self._get_indent(line)
+        if indent < min_indent: return None
+
+        if line.strip().startswith("- "):
+            return self._parse_list(indent)
+        else:
+            return self._parse_dict(indent)
+
+    def _parse_list(self, indent):
+        res = []
+        while True:
+            line = self._peek()
+            if not line: break
+            curr_indent = self._get_indent(line)
+            if curr_indent < indent: break
+            
+            if curr_indent == indent and line.strip().startswith("-"):
+                self.i += 1 
+                content = line.strip()[1:].strip()
+                
+                if content:
+                    if ":" in content and not content.startswith("{") and not content.startswith("["):
+                         k, v = self._parse_inline_kv(content)
+                         if k:
+                             res.append({k: v})
+                         else:
+                             res.append(self._parse_value(content))
+                    else:
+                        res.append(self._parse_value(content))
+                else:
+                    nested = self._parse_block(indent + 1)
+                    if nested is not None:
+                        res.append(nested)
+                    else:
+                         res.append({}) 
+            else:
+                break
+        return res
+
+    def _parse_dict(self, indent):
+        res = OrderedDict()
+        while True:
+            line = self._peek()
+            if not line: break
+            curr_indent = self._get_indent(line)
+            if curr_indent < indent: break
+            
+            stripped = line.strip()
+            if ":" not in stripped:
+                break
+                
+            colon_idx = stripped.find(":")
+            key = stripped[:colon_idx].strip()
+            val_part = stripped[colon_idx+1:].strip()
+            
+            self.i += 1 
+
+            if not val_part:
+
+                nested = self._parse_block(indent + 1)
+                res[key] = nested if nested is not None else {}
+
+            elif val_part == "|" or val_part == ">" or val_part.startswith("|-") or val_part.startswith(">-"):
+                 res[key] = self._parse_multiline_string(indent + 1)
+            else:
+                res[key] = self._parse_value(val_part)
+                
+        return res
+        
+    def _parse_multiline_string(self, indent):
+        lines = []
+        while True:
+            line = self._peek()
+            if not line: break
+            curr_indent = self._get_indent(line)
+            if curr_indent < indent: break
+            
+            self.i += 1
+            lines.append(line.strip())
+        return " ".join(lines)
+
+    def _parse_value(self, val_str):
+        val_str = val_str.strip()
+        if (val_str.startswith('"') and val_str.endswith('"')) or (val_str.startswith("'") and val_str.endswith("'")):
+            return val_str[1:-1]
+        if val_str.startswith("[") and val_str.endswith("]"):
+            inner = val_str[1:-1]
+            if not inner.strip(): return []
+            return [self._parse_value(x) for x in inner.split(",")]
+        if val_str.startswith("{") and val_str.endswith("}"):
+             return {}
+             
+        if val_str.lower() == "true": return True
+        if val_str.lower() == "false": return False
+        
+        try:
+            if "." in val_str: return float(val_str)
+            return int(val_str)
+        except:
+            return val_str
+
+    def _parse_inline_kv(self, content):
+         if ":" in content:
+             p = content.split(":", 1)
+             return p[0].strip(), self._parse_value(p[1])
+         return None, None
 
 
 class BurpExtender(IBurpExtender, ITab):
@@ -41,7 +180,6 @@ class BurpExtender(IBurpExtender, ITab):
         
         self.generated_tests_data = [] 
         
-        # Default Compliance Rules
         self.compliance_rules = {
             "mandatory": [
                 "Content-Type", 
@@ -91,9 +229,14 @@ class BurpExtender(IBurpExtender, ITab):
         self.endpoint_tabs = JTabbedPane()
         self.ep_req_area = JTextArea()
         self.ep_req_area.setEditable(True) 
+        self.ep_req_area.setLineWrap(True)
+        self.ep_req_area.setWrapStyleWord(True)
         self.ep_req_area.setFont(Font("Monospaced", Font.PLAIN, 12))
+        self._add_undo_redo(self.ep_req_area)
         self.ep_res_area = JTextArea()
         self.ep_res_area.setEditable(False)
+        self.ep_res_area.setLineWrap(True)
+        self.ep_res_area.setWrapStyleWord(True)
         
         self.endpoint_req_scroll = JScrollPane(self.ep_req_area)
         self.endpoint_res_scroll = JScrollPane(self.ep_res_area)
@@ -177,41 +320,42 @@ class BurpExtender(IBurpExtender, ITab):
         
         self.test_manager_panel = JPanel(BorderLayout())
         
-        # Compliance Toolbar
         comp_tools = JPanel(BorderLayout())
         
-        # Stats Panel
         self.comp_stats = JLabel("Compliance Status: Ready to assess. Load rules or use defaults.")
         self.comp_stats.setBorder(javax.swing.border.EmptyBorder(5, 10, 5, 10))
         comp_tools.add(self.comp_stats, BorderLayout.SOUTH)
         
-        # Buttons
         btns = JPanel()
         btns.add(JButton("Load Rules", actionPerformed=self.load_rules))
         btns.add(JButton("Save Sample Rules", actionPerformed=self.save_sample_rules))
-        btns.add(JButton("Run Assessment", actionPerformed=self.assess_compliance)) # Duplicate/Quick Access
+        btns.add(JButton("Run Assessment", actionPerformed=self.assess_compliance))
+        btns.add(JButton("Export CSV", actionPerformed=self.export_compliance_csv))
         comp_tools.add(btns, BorderLayout.CENTER)
         
         self.test_manager_panel.add(comp_tools, BorderLayout.NORTH)
         
-        # Compliance Table: ID, Method, Path, Violation, Detail
-        self.test_model = DefaultTableModel(["ID", "Method", "Path", "Violation", "Detail"], 0)
+        self.test_model = DefaultTableModel(["ID", "Group", "Method", "Path", "Violation", "Detail"], 0)
         self.test_table = JTable(self.test_model)
         self.test_table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION)
         self.test_table.getSelectionModel().addListSelectionListener(self.test_selected)
         
-        # Apply Renderer
-        self.test_table.getColumnModel().getColumn(3).setCellRenderer(ComplianceRenderer())
+        self.test_table.getColumnModel().getColumn(4).setCellRenderer(ComplianceRenderer())
         
         self.preview_panel = JPanel(BorderLayout())
         
         self.tm_tabs = JTabbedPane()
         self.tm_req_text = JTextArea()
         self.tm_req_text.setEditable(True) 
+        self.tm_req_text.setLineWrap(True)
+        self.tm_req_text.setWrapStyleWord(True)
         self.tm_req_text.setFont(Font("Monospaced", Font.PLAIN, 12))
+        self._add_undo_redo(self.tm_req_text)
         
         self.tm_res_text = JTextArea()
         self.tm_res_text.setEditable(False)
+        self.tm_res_text.setLineWrap(True)
+        self.tm_res_text.setWrapStyleWord(True)
         self.tm_res_text.setFont(Font("Monospaced", Font.PLAIN, 12))
         
         self.tm_req_scroll = JScrollPane(self.tm_req_text)
@@ -266,13 +410,13 @@ class BurpExtender(IBurpExtender, ITab):
             is_yaml = False
             root = None
             try:
-                root = json.loads(raw)
+                root = json.loads(raw, object_pairs_hook=OrderedDict)
             except:
                 try:
-                    from org.yaml.snakeyaml import Yaml
-                    root = Yaml().load(raw)
-                    is_yaml = True
-                    self.log("Parsed as YAML")
+                    root = SimpleYamlParser.parse(raw)
+                    if root:
+                        is_yaml = True
+                        self.log("Parsed as YAML (Embedded Parser)")
                 except Exception as ye:
                     self.log("JSON and YAML parsing failed. Error: %s" % ye)
                     return
@@ -289,17 +433,16 @@ class BurpExtender(IBurpExtender, ITab):
                 self.load_environment(root)
                 self.parse_insomnia(root)
             elif "swagger" in root or "openapi" in root:
-                if is_yaml: self.log("Detected Swagger/OpenAPI (YAML)")
-                else: self.log("Detected Swagger/OpenAPI (JSON)")
+                if is_yaml: self.log("Detected Swagger/OpenAPI (YAML). Keys: %s" % (list(root.keys()) if isinstance(root, dict) else "Not a dict"))
+                else: self.log("Detected Swagger/OpenAPI (JSON). Keys: %s" % (list(root.keys()) if isinstance(root, dict) else "Not a dict"))
                 self.parse_openapi(root)
             elif is_postman:
                 self.log("Detected Postman Collection")
                 self.parse_postman(root)
             else:
-                # Try cURL parsing as a fallback
                 is_curl = self.parse_curl(raw)
                 if not is_curl:
-                    self.log("Unknown format. structure: %s" % root.keys())
+                    self.log("Unknown format. structure: %s" % (root.keys() if hasattr(root, "keys") else type(root)))
                     self.parse_openapi(root) 
                 else:
                     self.log("Detected cURL command")
@@ -330,15 +473,10 @@ class BurpExtender(IBurpExtender, ITab):
             return False
             
         try:
-            # Clean up the text: remove backslashes used for line continuation
             clean_text = text.replace("\\\n", " ").replace("\\\r\n", " ").strip()
-            
-            # Use shlex to split preserving quotes
-            # Parsing "curl" command line arguments
             try:
                 args = shlex.split(clean_text)
             except:
-                # Fallback for simple splitting if shlex fails on weird chars
                 args = clean_text.split()
                 
             if len(args) < 2:
@@ -365,7 +503,7 @@ class BurpExtender(IBurpExtender, ITab):
                 elif arg in ["-d", "--data", "--data-raw", "--data-binary", "--data-ascii"]:
                     if i + 1 < len(args):
                         body = args[i+1]
-                        method = "POST" # Default to POST if data is present
+                        method = "POST" 
                         i += 1
                 elif arg in ["-u", "--user"]:
                      if i + 1 < len(args):
@@ -379,7 +517,6 @@ class BurpExtender(IBurpExtender, ITab):
             if not url:
                 return False
                 
-            # Clean URL
             raw_url = self.resolve_vars(url)
             if not raw_url.startswith("http"):
                 raw_url = "https://" + raw_url
@@ -389,7 +526,6 @@ class BurpExtender(IBurpExtender, ITab):
             scheme = u.getProtocol().upper()
             path = u.getPath() or "/"
             
-            # Check for specific headers to refine auth/content-type
             for h in headers:
                 if "Authorization" in h:
                     if "Bearer" in h: auth = "Bearer"
@@ -403,10 +539,9 @@ class BurpExtender(IBurpExtender, ITab):
             if body:
                 self.bodies[self.model.getRowCount() - 1] = body
                 
-                # Try to extract params if JSON
                 req_params = []
                 try:
-                    j_body = json.loads(body)
+                    j_body = json.loads(body, object_pairs_hook=OrderedDict)
                     req_params = list(self._extract_json_keys(j_body))
                 except:
                     pass
@@ -421,22 +556,32 @@ class BurpExtender(IBurpExtender, ITab):
             return False
 
     def clear_data(self, event):
-        self.model.setRowCount(0)
-        self.test_model.setRowCount(0)
-        self.generated_tests_data = []
-        self.env = {}
-        self.bodies = {}
-        self.api_spec = {}
-        self.stats.setText("Data cleared")
-        self.update_dashboard(None)
-        self.tm_req_text.setText("")
-        self.tm_res_text.setText("")
-        self.preview_btn.setEnabled(False)
-        self.tm_send_btn.setEnabled(False)
-        self.tm_reset_btn.setEnabled(False)
+        confirm = JOptionPane.showConfirmDialog(
+            self.main_panel,
+            "Are you sure you want to clear all imported APIs and results?",
+            "Confirm Clear Data",
+            JOptionPane.YES_NO_OPTION
+        )
         
-        self.ep_req_area.setText("")
-        self.ep_res_area.setText("")
+        if confirm == JOptionPane.YES_OPTION:
+            self.model.setRowCount(0)
+            self.bodies = {}
+            self.api_spec = {}
+            self.postman_item_count = 0
+            self.generated_tests_data = [] 
+            self.test_model.setRowCount(0)
+            self.param_model.setRowCount(0)
+            
+            self.stats.setText("Data cleared")
+            self.update_dashboard(None)
+            self.tm_req_text.setText("")
+            self.tm_res_text.setText("")
+            self.preview_btn.setEnabled(False)
+            self.tm_send_btn.setEnabled(False)
+            self.tm_reset_btn.setEnabled(False)
+            
+            self.ep_req_area.setText("")
+            self.ep_res_area.setText("")
         
         self.env_model.setRowCount(0)
         self.env_host.setText("")
@@ -499,9 +644,14 @@ class BurpExtender(IBurpExtender, ITab):
             return text
 
         def repl(m):
-            return self.env.get(m.group(1), m.group(0))
+            key = m.group(1).strip()
+            if key.startswith("_."):
+                simple_key = key[2:]
+                if simple_key in self.env: return self.env[simple_key]
+            
+            return self.env.get(key, m.group(0))
 
-        return re.sub(r"\{\{\s*_\.(.*?)\s*\}\}", repl, text)
+        return re.sub(r"\{\{\s*(.*?)\s*\}\}", repl, text)
 
     
     def _extract_json_keys(self, data):
@@ -546,7 +696,7 @@ class BurpExtender(IBurpExtender, ITab):
                 req_params = []
                 if body:
                     try:
-                        j_body = json.loads(body)
+                        j_body = json.loads(body, object_pairs_hook=OrderedDict)
                         req_params = list(self._extract_json_keys(j_body))
                     except:
                         pass
@@ -564,6 +714,12 @@ class BurpExtender(IBurpExtender, ITab):
 
     def parse_postman(self, root):
         self.postman_item_count = 0
+        
+        if "variable" in root:
+            for v in root["variable"]:
+                if "key" in v and "value" in v:
+                    self.env[v["key"]] = v["value"]
+                    
         items = root.get("item", [])
         self._traverse_postman_items(items)
         self.stats.setText("Imported %d Postman endpoints" % self.postman_item_count)
@@ -600,7 +756,7 @@ class BurpExtender(IBurpExtender, ITab):
 
             auth = "None"
             if req.get("auth"):
-                 auth = req["auth"].get("type", "Custom")
+                 auth = req["auth"].get("type", "Custom").title()
             
             risk = self.risk(verb, auth)
 
@@ -619,7 +775,7 @@ class BurpExtender(IBurpExtender, ITab):
             req_params = []
             if body:
                 try:
-                    j_body = json.loads(body)
+                    j_body = json.loads(body, object_pairs_hook=OrderedDict)
                     req_params = list(self._extract_json_keys(j_body))
                 except:
                     pass
@@ -634,13 +790,29 @@ class BurpExtender(IBurpExtender, ITab):
     def parse_openapi(self, root):
         count = 0
         paths = root.get("paths", {})
+        self.log("Parsing OpenAPI. Found %d paths." % len(paths))
         
         base_url = "https://example.com"
-        if "servers" in root and len(root["servers"]) > 0:
-            base_url = root["servers"][0].get("url", base_url)
-        elif "host" in root:
-             scheme = "https" if "https" in root.get("schemes", []) else "http"
-             base_url = "%s://%s%s" % (scheme, root.get("host"), root.get("basePath", ""))
+        
+        if "swagger" in root:
+            # Swagger 2.0
+            scheme = "https"
+            if "schemes" in root and root["schemes"]:
+                 if "https" in root["schemes"]: scheme = "https"
+                 else: scheme = root["schemes"][0]
+            
+            host = root.get("host", "example.com")
+            base_path = root.get("basePath", "")
+            base_url = "%s://%s%s" % (scheme, host, base_path)
+            self.log("Detected Swagger 2.0. Base URL: %s" % base_url)
+            
+        elif "openapi" in root:
+            if "servers" in root and len(root["servers"]) > 0:
+                base_url = root["servers"][0].get("url", base_url)
+            self.log("Detected OpenAPI 3.0. Base URL: %s" % base_url)
+        
+        if base_url.endswith("/"):
+            base_url = base_url[:-1]
 
         for path, methods in paths.items():
             for method, spec in methods.items():
@@ -648,8 +820,16 @@ class BurpExtender(IBurpExtender, ITab):
                     continue
                 
                 try:
-                    full_url = base_url + path
-                    u = URL(full_url)
+                    safe_path = path
+                    if not safe_path.startswith("/"): safe_path = "/" + safe_path
+                    
+                    full_url = base_url + safe_path
+                    try:
+                        u = URL(full_url)
+                    except:
+                        if not full_url.startswith("http"):
+                            full_url = "https://" + full_url.lstrip("/")
+                        u = URL(full_url)
                     
                     domain = u.getHost()
                     scheme = u.getProtocol().upper()
@@ -657,8 +837,20 @@ class BurpExtender(IBurpExtender, ITab):
                     r_path = u.getPath()
                     
                     auth = "None"
-                    if "security" in spec or "security" in root:
-                        auth = "API Key/Bearer" 
+                    
+                    effective_sec = spec.get("security")
+                    
+                    if effective_sec is None:
+                        effective_sec = root.get("security")
+                        
+                    if effective_sec:
+                        schemes = set()
+                        for s in effective_sec:
+                            schemes.update(s.keys())
+                        if schemes:
+                            auth = ", ".join(sorted(list(schemes)))
+                    elif effective_sec is not None and len(effective_sec) == 0:
+                        auth = "None"
                     
                     risk = self.risk(verb, auth)
                     
@@ -676,12 +868,24 @@ class BurpExtender(IBurpExtender, ITab):
                                 body = json.dumps(self.generate_example(schema, root), indent=2)
                                 req_params = list(self._extract_openapi_keys(schema, root))
 
+                    if "parameters" in spec:
+                        for p in spec["parameters"]:
+                             if p.get("in") == "body" and "schema" in p:
+                                 schema = p["schema"]
+                                 body = json.dumps(self.generate_example(schema, root), indent=2)
+                                 req_params = list(self._extract_openapi_keys(schema, root))
+                    
                     for code in ["200", "201", "default"]:
                          if code in spec["responses"]:
                              resp_obj = spec["responses"][code]
+                             
                              if "content" in resp_obj and "application/json" in resp_obj["content"]:
                                  schema = resp_obj["content"]["application/json"].get("schema")
                                  if schema:
+                                     res_params = list(self._extract_openapi_keys(schema, root))
+                             elif "schema" in resp_obj:
+                                  schema = resp_obj["schema"]
+                                  if schema:
                                      res_params = list(self._extract_openapi_keys(schema, root))
                              break 
 
@@ -746,7 +950,27 @@ class BurpExtender(IBurpExtender, ITab):
             
         return keys
 
-    
+        
+    def _add_undo_redo(self, text_area):
+        undo_manager = UndoManager()
+        text_area.getDocument().addUndoableEditListener(lambda e: undo_manager.addEdit(e.getEdit()))
+        
+        class UndoAction(AbstractAction):
+            def actionPerformed(self, e):
+                if undo_manager.canUndo():
+                    undo_manager.undo()
+
+        class RedoAction(AbstractAction):
+            def actionPerformed(self, e):
+                 if undo_manager.canRedo():
+                     undo_manager.redo()
+
+        text_area.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_Z, InputEvent.CTRL_MASK), "Undo")
+        text_area.getActionMap().put("Undo", UndoAction())
+        
+        text_area.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_Y, InputEvent.CTRL_MASK), "Redo")
+        text_area.getActionMap().put("Redo", RedoAction())
+
     def update_dashboard(self, event):
         total = self.model.getRowCount()
         if total == 0:
@@ -879,11 +1103,6 @@ class BurpExtender(IBurpExtender, ITab):
 
         return hits
 
-
-    # ---------------- Compliance Logic ----------------
-
-    # ---------------- Compliance Logic ----------------
-
     def save_sample_rules(self, event):
         chooser = JFileChooser()
         chooser.setSelectedFile(java.io.File("compliance_rules.json"))
@@ -906,7 +1125,6 @@ class BurpExtender(IBurpExtender, ITab):
                 with open(path, "r") as f:
                     self.compliance_rules = json.load(f)
                 
-                # Validation check
                 if "mandatory" not in self.compliance_rules or "forbidden" not in self.compliance_rules:
                      JOptionPane.showMessageDialog(self.main_panel, "Invalid format. Rules must contain 'mandatory' and 'forbidden' keys.")
                      return
@@ -916,6 +1134,39 @@ class BurpExtender(IBurpExtender, ITab):
             except Exception as e:
                 JOptionPane.showMessageDialog(self.main_panel, "Error loading rules: %s" % e)
 
+    def export_compliance_csv(self, event):
+        chooser = JFileChooser()
+        chooser.setSelectedFile(java.io.File("compliance_results.csv"))
+        chooser.setDialogTitle("Export Compliance Results")
+        
+        if chooser.showSaveDialog(self.main_panel) == JFileChooser.APPROVE_OPTION:
+            try:
+                path = chooser.getSelectedFile().getAbsolutePath()
+                with open(path, "wb") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["ID", "Group", "Method", "Path", "Violation", "Detail", "Request", "Response"])
+                    
+                    for data in self.generated_tests_data:
+                        info = data['info']
+                        
+                        t_id = data['id']
+                        group = self._get_path_group(info['url'].getPath())
+                        method = info['headers'][0].split(" ")[0]
+                        url_path = info['url'].getPath()
+                        desc_parts = data['description'].split(": ", 1)
+                        v_type = desc_parts[0]
+                        detail = desc_parts[1] if len(desc_parts) > 1 else ""
+                        
+                        req_str = self.helpers.bytesToString(data['request_bytes'])
+                        resp_str = self.helpers.bytesToString(data.get('response_bytes', b""))
+                        
+                        writer.writerow([t_id, group, method, url_path, v_type, detail, req_str, resp_str])
+                        
+                JOptionPane.showMessageDialog(self.main_panel, "Exported %d records to %s" % (len(self.generated_tests_data), path))
+            except Exception as e:
+                self.log("Export error: %s" % e)
+                JOptionPane.showMessageDialog(self.main_panel, "Error exporting CSV: %s" % e)
+
     def assess_compliance(self, event):
         rows = self.table.getSelectedRows()
         if len(rows) == 0:
@@ -923,28 +1174,26 @@ class BurpExtender(IBurpExtender, ITab):
             return
 
         self.stats.setText("Assessing %d endpoints..." % len(rows))
-        self.test_model.setRowCount(0) # Clear previous results
+        self.test_model.setRowCount(0) 
         self.generated_tests_data = []
         
-        # Run in thread
+
         t = threading.Thread(target=self._run_assessment, args=(rows,))
         t.start()
         
-        self.tabs.setSelectedIndex(3) # Switch to Compliance tab
+        self.tabs.setSelectedIndex(3) 
 
     def _run_assessment(self, rows):
         total_endpoints = len(rows)
         violations_count = 0
         
         for idx, row in enumerate(rows):
-            # Update progress every request
             SwingUtilities.invokeLater(lambda: self.stats.setText("Assessing %d/%d..." % (idx + 1, total_endpoints)))
             
             info = self.build_request_info(row)
             if not info: continue
             
             try:
-                # Execute Request
                 req_bytes = self.helpers.buildHttpMessage(info['headers'], info['body'].encode('utf-8') if info['body'] else b"")
                 resp = self.callbacks.makeHttpRequest(
                     info['host'],
@@ -955,38 +1204,40 @@ class BurpExtender(IBurpExtender, ITab):
                 
                 if resp:
                     r_info = self.helpers.analyzeResponse(resp)
-                    headers = r_info.getHeaders() # List of strings
+                    headers = r_info.getHeaders() #
                     
-                    # Convert headers to dict for easy lookup (lowercase keys)
                     h_dict = {}
                     for h in headers:
                         if ":" in h:
                             parts = h.split(":", 1)
                             h_dict[parts[0].strip().lower()] = parts[1].strip()
                     
-                    # Check Mandatory
                     missing = []
                     for m in self.compliance_rules.get("mandatory", []):
                         if m.lower() not in h_dict:
-                            self.store_violation(info, req_bytes, "Missing Mandatory Header", m)
                             missing.append(m)
                             violations_count += 1
                             
-                    # Check Forbidden
                     forbidden = []
                     for f in self.compliance_rules.get("forbidden", []):
                         if f.lower() in h_dict:
-                             self.store_violation(info, req_bytes, "Forbidden Header Present", "%s: %s" % (f, h_dict[f.lower()]))
                              forbidden.append(f)
                              violations_count += 1
                     
+                    group = self._get_path_group(info['url'].getPath())
+                    
                     if not missing and not forbidden:
-                        self.store_violation(info, req_bytes, "Compliant", "All checks passed")
-                             
+                        self.store_violation(info, req_bytes, resp, "Compliant", "All checks passed", group)
+                    
+                    for m in missing:
+                         self.store_violation(info, req_bytes, resp, "Missing Mandatory Header", m, group)
+                    
+                    for f in forbidden:
+                          self.store_violation(info, req_bytes, resp, "Forbidden Header Present", "%s: %s" % (f, h_dict[f.lower()]), group)
+
             except Exception as e:
                 self.log("Assessment error: %s" % e)
         
-        # Update Stats UI
         files_checked = total_endpoints
         
         def update_final_ui():
@@ -997,15 +1248,17 @@ class BurpExtender(IBurpExtender, ITab):
         SwingUtilities.invokeLater(update_final_ui)
 
             
-    def store_violation(self, info, req_bytes, v_type, detail):
+            
+    def store_violation(self, info, req_bytes, resp_bytes, v_type, detail, group):
         test_id = len(self.generated_tests_data)
         self.generated_tests_data.append({
             "id": test_id,
             "info": info,
             "request_bytes": req_bytes,
+            "response_bytes": resp_bytes,
             "description": "%s: %s" % (v_type, detail)
         })
-        SwingUtilities.invokeLater(lambda: self.test_model.addRow([test_id, info['headers'][0].split(" ")[0], info['url'].getPath(), v_type, detail]))
+        SwingUtilities.invokeLater(lambda: self.test_model.addRow([test_id, group, info['headers'][0].split(" ")[0], info['url'].getPath(), v_type, detail]))
 
 
     def test_selected(self, event):
@@ -1017,7 +1270,10 @@ class BurpExtender(IBurpExtender, ITab):
             test_id = self.test_model.getValueAt(row, 0)
             data = self.generated_tests_data[test_id]
             self.tm_req_text.setText(self.helpers.bytesToString(data['request_bytes']))
-            self.tm_res_text.setText("") 
+            
+            resp = data.get('response_bytes')
+            self.tm_res_text.setText(self.helpers.bytesToString(resp) if resp else "") 
+            
             self.preview_btn.setEnabled(True)
             self.tm_send_btn.setEnabled(True)
             self.tm_reset_btn.setEnabled(True)
@@ -1061,7 +1317,8 @@ class BurpExtender(IBurpExtender, ITab):
             test_id = self.test_model.getValueAt(row, 0)
             data = self.generated_tests_data[test_id]
             self.tm_req_text.setText(self.helpers.bytesToString(data['request_bytes']))
-            self.tm_res_text.setText("Reset to original test case.")
+            resp = data.get('response_bytes')
+            self.tm_res_text.setText(self.helpers.bytesToString(resp) if resp else "")
 
     def send_test_request(self, event):
         req_str = self.tm_req_text.getText()
@@ -1199,8 +1456,10 @@ class BurpExtender(IBurpExtender, ITab):
 
     def _do_request(self, row, info, req_str=None):
         try:
-            self.model.setValueAt("Sending...", row, 7)
-            self.stats.setText("Sending request...")
+            def update_start():
+                self.model.setValueAt("Sending...", row, 7)
+                self.stats.setText("Sending request...")
+            SwingUtilities.invokeLater(update_start)
             
             if req_str:
                 req_bytes = self.helpers.stringToBytes(req_str)
@@ -1216,15 +1475,21 @@ class BurpExtender(IBurpExtender, ITab):
             
             if resp:
                 status_code = self.helpers.analyzeResponse(resp).getStatusCode()
-                self.model.setValueAt("%d %s" % (status_code, "OK" if status_code == 200 else ""), row, 7)
+                resp_str = self.helpers.bytesToString(resp)
                 
-                self.ep_res_area.setText(self.helpers.bytesToString(resp))
-                self.stats.setText("Response received: %d bytes (Status: %d)" % (len(resp), status_code))
+                def update_complete():
+                    self.model.setValueAt("%d %s" % (status_code, "OK" if status_code == 200 else ""), row, 7)
+                    self.ep_res_area.setText(resp_str)
+                    self.stats.setText("Response received: %d bytes (Status: %d)" % (len(resp), status_code))
+                SwingUtilities.invokeLater(update_complete)
+                
         except Exception as e:
             traceback.print_exc()
-            self.model.setValueAt("Error", row, 7)
-            self.ep_res_area.setText("Error: %s" % e)
-            self.stats.setText("Error sending request")
+            def update_error():
+                self.model.setValueAt("Error", row, 7)
+                self.ep_res_area.setText("Error: %s" % e)
+                self.stats.setText("Error sending request")
+            SwingUtilities.invokeLater(update_error)
 
     def reset_endpoint_request(self, event):
         row = self.table.getSelectedRow()
@@ -1245,7 +1510,15 @@ class BurpExtender(IBurpExtender, ITab):
             return "OAuth2"
         if "bearer" in t:
             return "Bearer"
+        if "bearer" in t:
+            return "Bearer"
         return "API Key"
+
+    def _get_path_group(self, path):
+        parts = [p for p in path.split("/") if p and p.lower() not in ["api", "v1", "v2", "v3", "rest"]]
+        if parts:
+            return parts[0]
+        return "root"
 
     def risk(self, verb, auth):
         if auth == "None" and verb != "GET":
@@ -1318,7 +1591,7 @@ class ComplianceRenderer(DefaultTableCellRenderer):
         elif "Forbidden" in s:
              c.setForeground(Color.ORANGE.darker())
         elif "Compliant" in s:
-             c.setForeground(Color.decode("#00aa00")) # Green
+             c.setForeground(Color.decode("#00aa00")) 
         else:
              c.setForeground(Color.BLACK)
              
