@@ -175,6 +175,7 @@ class BurpExtender(IBurpExtender, ITab):
 
         self.env = {}
         self.bodies = {}
+        self.responses = {}  
         self.api_spec = {} 
         self.vulns = [] 
         
@@ -566,6 +567,7 @@ class BurpExtender(IBurpExtender, ITab):
         if confirm == JOptionPane.YES_OPTION:
             self.model.setRowCount(0)
             self.bodies = {}
+            self.responses = {} 
             self.api_spec = {}
             self.postman_item_count = 0
             self.generated_tests_data = [] 
@@ -749,7 +751,13 @@ class BurpExtender(IBurpExtender, ITab):
 
             u = URL(raw_url)
             domain = u.getHost()
+            port = u.getPort()
             scheme = u.getProtocol().upper()
+            
+            if port != -1:
+                if not ((scheme == "HTTP" and port == 80) or (scheme == "HTTPS" and port == 443)):
+                    domain = "%s:%d" % (domain, port)
+            
             path = u.getPath() or "/"
             
             verb = req.get("method", "GET")
@@ -795,7 +803,6 @@ class BurpExtender(IBurpExtender, ITab):
         base_url = "https://example.com"
         
         if "swagger" in root:
-            # Swagger 2.0
             scheme = "https"
             if "schemes" in root and root["schemes"]:
                  if "https" in root["schemes"]: scheme = "https"
@@ -832,7 +839,13 @@ class BurpExtender(IBurpExtender, ITab):
                         u = URL(full_url)
                     
                     domain = u.getHost()
+                    port = u.getPort()
                     scheme = u.getProtocol().upper()
+                    
+                    if port != -1:
+                        if not ((scheme == "HTTP" and port == 80) or (scheme == "HTTPS" and port == 443)):
+                            domain = "%s:%d" % (domain, port)
+                    
                     verb = method.upper()
                     r_path = u.getPath()
                     
@@ -1431,11 +1444,17 @@ class BurpExtender(IBurpExtender, ITab):
             
         row = self.table.getSelectedRow()
         if row >= 0:
-            info = self.build_request_info(row)
-            if info:
-                req_bytes = self.helpers.buildHttpMessage(info['headers'], info['body'].encode('utf-8') if info['body'] else b"")
-                self.ep_req_area.setText(self.helpers.bytesToString(req_bytes))
-                self.ep_res_area.setText("") 
+            if row in self.responses:
+                cached = self.responses[row]
+                self.ep_req_area.setText(cached['request'])
+                self.ep_res_area.setText(cached['response'])
+                self.stats.setText("Showing cached response (Status: %s)" % cached['status'])
+            else:
+                info = self.build_request_info(row)
+                if info:
+                    req_bytes = self.helpers.buildHttpMessage(info['headers'], info['body'].encode('utf-8') if info['body'] else b"")
+                    self.ep_req_area.setText(self.helpers.bytesToString(req_bytes))
+                    self.ep_res_area.setText("") 
             
             if self.autoScan.isSelected():
                 self.send_to_repeater(row)
@@ -1462,9 +1481,20 @@ class BurpExtender(IBurpExtender, ITab):
             SwingUtilities.invokeLater(update_start)
             
             if req_str:
-                req_bytes = self.helpers.stringToBytes(req_str)
+                req_bytes_temp = self.helpers.stringToBytes(req_str)
+                req_info = self.helpers.analyzeRequest(req_bytes_temp)
+                headers = list(req_info.getHeaders())
+                
+                body_offset = req_info.getBodyOffset()
+                body_bytes = req_bytes_temp[body_offset:]
+                
+                req_bytes = self.helpers.buildHttpMessage(headers, body_bytes)
             else:
                 req_bytes = self.helpers.buildHttpMessage(info['headers'], info['body'].encode('utf-8') if info['body'] else b"")
+            
+            req_str_final = self.helpers.bytesToString(req_bytes)
+            
+            self.log("Sending request to %s:%d (HTTPS=%s)" % (info['host'], info['port'], info['use_https']))
             
             resp = self.callbacks.makeHttpRequest(
                 info['host'],
@@ -1476,15 +1506,44 @@ class BurpExtender(IBurpExtender, ITab):
             if resp:
                 status_code = self.helpers.analyzeResponse(resp).getStatusCode()
                 resp_str = self.helpers.bytesToString(resp)
+                status_text = "%d %s" % (status_code, "OK" if status_code == 200 else "")
+                
+                self.responses[row] = {
+                    'request': req_str_final,
+                    'response': resp_str,
+                    'status': status_text
+                }
                 
                 def update_complete():
-                    self.model.setValueAt("%d %s" % (status_code, "OK" if status_code == 200 else ""), row, 7)
+                    self.model.setValueAt(status_text, row, 7)
                     self.ep_res_area.setText(resp_str)
                     self.stats.setText("Response received: %d bytes (Status: %d)" % (len(resp), status_code))
                 SwingUtilities.invokeLater(update_complete)
+            else:
+                self.log("No response received from server (connection failed or timeout)")
+                
+                self.responses[row] = {
+                    'request': req_str_final,
+                    'response': "No response received. Check if the server is running and accessible.",
+                    'status': "No Response"
+                }
+                
+                def update_no_response():
+                    self.model.setValueAt("No Response", row, 7)
+                    self.ep_res_area.setText("No response received. Check if the server is running and accessible.")
+                    self.stats.setText("Request failed: No response from server")
+                SwingUtilities.invokeLater(update_no_response)
                 
         except Exception as e:
             traceback.print_exc()
+            self.log("Request error: %s" % str(e))
+            
+            self.responses[row] = {
+                'request': req_str if req_str else "",
+                'response': "Error: %s" % e,
+                'status': "Error"
+            }
+            
             def update_error():
                 self.model.setValueAt("Error", row, 7)
                 self.ep_res_area.setText("Error: %s" % e)

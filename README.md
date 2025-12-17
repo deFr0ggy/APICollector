@@ -1,4 +1,4 @@
-# APICollector
+# APICollector v0.0.1
 
 **APICollector** is a powerful Burp Suite extension designed to verify and audit REST APIs. It bridges the gap between API development exports (Insomnia, Postman, OpenAPI) and security testing, providing a centralized dashboard for static analysis, traffic collection, and compliance auditing.
 
@@ -13,6 +13,7 @@
 *   **Zero Dependencies**: Embedded YAML parser - no external libraries required
 *   **Variable Resolution**: Automatic resolution of Postman/Insomnia variables (`{{baseUrl}}`, `{{_.variable}}`)
 *   **Order Preservation**: APIs display in the same order as your source file
+*   **Port Detection**: Automatically extracts and preserves custom ports (e.g., `localhost:5000`)
 
 ### Security Dashboard
 *   Instant static analysis against **OWASP API Security Top 10 (2023)**
@@ -26,6 +27,7 @@
 *   **Editable Requests**: Modify headers/bodies on the fly with **Undo/Redo support (Ctrl+Z / Ctrl+Y)**
 *   **Word Wrap**: Request and Response text areas support line wrapping for better readability
 *   **Execute Internal**: Send requests directly from the extension without leaving Burp
+*   **Response Caching**: Switch between endpoints and see your previous results - nothing gets lost!
 
 ### Compliance Manager
 *   **Automated Checking**: Test security headers (`HSTS`, `Content-Security-Policy`, etc.)
@@ -51,10 +53,10 @@
     *   Burp Suite (Community or Professional)
     *   Jython Standalone JAR (`jython-standalone-2.7.x.jar`)
 2.  **Setup Jython**:
-    *   Go to **Extensions** -> **Extensions Settings**
+    *   Go to **Extensions** → **Extensions Settings**
     *   Under **Python Environment**, select your `jython-standalone.jar`
 3.  **Load Extension**:
-    *   Go to **Extensions** -> **Installed**
+    *   Go to **Extensions** → **Installed**
     *   Click **Add**
     *   Select **Extension type**: `Python`
     *   Select the `APICollector.py` file
@@ -67,6 +69,7 @@
 *   **File Import**: Click **Import API** and select your Insomnia/Postman/OpenAPI file (JSON or YAML)
 *   **Clipboard**: Copy a cURL command and click **Paste cURL** to add it instantly
 *   *Note: Collection variables are automatically loaded and resolved (e.g., `{{baseUrl}}`).*
+*   *Tip: Custom ports (like `localhost:5000`) are automatically detected and preserved.*
 
 ### 2. Static Analysis (Dashboard)
 *   Immediately after import, switch to the **Dashboard** tab
@@ -81,6 +84,7 @@
 *   **Send**:
     *   **Execute (Internal)**: Sends the request from the extension. The response status updates in the table (Green for 2xx, Red for 4xx/5xx)
     *   **Send to Repeater**: Pushes the selected request(s) to Burp's Repeater tool for manual testing
+*   **Response Caching**: Switch to another endpoint and come back - your previous request/response is preserved!
 *   **Filter**: Use the "Verb Filter" dropdown to show only `POST` or `DELETE` requests
 
 ### 4. Auditing Compliance (Compliance Tab)
@@ -124,23 +128,39 @@ Replace manual header checks with the auto-assessor.
 
 *   **Word Wrap**: Long request/response lines automatically wrap for better readability
 *   **Undo/Redo**: Edit requests freely - you can always undo with Ctrl+Z
+*   **Response Caching**: Switch between endpoints without losing your test results
 *   **Grouping**: Use the Group column in Compliance tab to quickly find all violations for a specific API area
 *   **CSV Export**: Share compliance reports with your team or import into Excel for further analysis
 *   **Thread Safety**: All UI operations are thread-safe - the extension won't freeze during bulk operations
+*   **Port Handling**: Custom ports are automatically detected (e.g., `localhost:5000` for development APIs)
 
 ---
 
-## 📝 Recent Improvements
+## 📝 Version 0.0.1 Release Notes
 
+### Features
 *   ✅ Unified OpenAPI/Swagger support (v2.0 & v3.0)
-*   ✅ Fixed Postman variable resolution
-*   ✅ Embedded YAML parser (zero dependencies)
+*   ✅ Postman Collections (v2.1) import with variable resolution
+*   ✅ Embedded YAML parser (zero external dependencies)
 *   ✅ Preserved API definition order
-*   ✅ Fixed "Execute Internal" UI freeze
-*   ✅ Added word wrap to text areas
-*   ✅ Enhanced Compliance features (Response display, Path grouping, CSV export)
-*   ✅ Undo/Redo support (Ctrl+Z / Ctrl+Y)
+*   ✅ Fixed "Execute Internal" UI freeze with thread-safe updates
+*   ✅ Word wrap for Request/Response text areas
+*   ✅ Undo/Redo support (Ctrl+Z / Ctrl+Y) for request editing
+*   ✅ Response caching - switch between endpoints without losing results
+*   ✅ Enhanced Compliance features:
+    *   Response display for violations
+    *   Path grouping for better organization
+    *   CSV export with full Request/Response data
 *   ✅ Clear Data confirmation dialog
+*   ✅ Proper port detection and handling (e.g., `localhost:5000`)
+*   ✅ Fixed POST request Content-Length calculation
+
+### Bug Fixes
+*   🐛 Fixed POST requests hanging due to Content-Length mismatch
+*   🐛 Fixed domain/port extraction for non-standard ports
+*   🐛 Fixed Postman variable resolution (`{{variable}}` syntax)
+*   🐛 Fixed Auth column accuracy for OpenAPI security schemes
+*   🐛 Fixed YAML import dependency issues
 
 ---
 
@@ -160,3 +180,4 @@ This project is released under the MIT License.
 
 *   **OWASP API Security Top 10**: https://owasp.org/API-Security/
 *   **Burp Suite**: https://portswigger.net/burp
+*   **GitHub**: https://github.com/deFr0ggy/APICollector
