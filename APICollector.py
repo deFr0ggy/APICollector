@@ -452,6 +452,11 @@ class BurpExtender(IBurpExtender, ITab):
         self.test_manager_panel.add(self.split, BorderLayout.CENTER)
         
         self.param_panel = JPanel(BorderLayout())
+        
+        param_tools = JPanel(FlowLayout(FlowLayout.LEFT))
+        param_tools.add(JButton("Export CSV", actionPerformed=self.export_params_csv))
+        self.param_panel.add(param_tools, BorderLayout.NORTH)
+        
         self.param_model = DefaultTableModel(["Method", "Path", "Request Params", "Response Params"], 0)
         self.param_table = JTable(self.param_model)
         self.param_panel.add(JScrollPane(self.param_table), BorderLayout.CENTER)
@@ -1085,7 +1090,31 @@ class BurpExtender(IBurpExtender, ITab):
             
         return keys
 
-        
+    def _extract_json_keys(self, data):
+        keys = set()
+        if isinstance(data, dict):
+            for k, v in data.items():
+                keys.add(k)
+                keys.update(self._extract_json_keys(v))
+        elif isinstance(data, list):
+            for item in data:
+                keys.update(self._extract_json_keys(item))
+        return keys
+
+    def _update_param_row(self, row, res_keys=None):
+        if row < 0 or row >= self.param_model.getRowCount():
+            return
+            
+        def perform_sync():
+            existing_res = self.param_model.getValueAt(row, 3)
+            existing_set = set([p.strip() for p in existing_res.split(",") if p.strip()])
+            
+            if res_keys:
+                merged_res = existing_set.union(res_keys)
+                self.param_model.setValueAt(", ".join(sorted(merged_res)), row, 3)
+                
+        SwingUtilities.invokeLater(perform_sync)
+
     def _add_undo_redo(self, text_area):
         undo_manager = UndoManager()
         text_area.getDocument().addUndoableEditListener(lambda e: undo_manager.addEdit(e.getEdit()))
@@ -1757,6 +1786,19 @@ class BurpExtender(IBurpExtender, ITab):
                     self.model.setValueAt(status_text, row, 7)
                     self.ep_res_area.setText(resp_str)
                     self.stats.setText("Response received: %d bytes (Status: %d)" % (len(resp), status_code))
+                    
+                    # Log response parameters if it's JSON
+                    try:
+                        response_info = self.helpers.analyzeResponse(resp)
+                        body_offset = response_info.getBodyOffset()
+                        body = self.helpers.bytesToString(resp[body_offset:])
+                        data = json.loads(body)
+                        new_keys = self._extract_json_keys(data)
+                        if new_keys:
+                            self._update_param_row(row, res_keys=new_keys)
+                    except:
+                        pass # Not JSON or empty body
+                        
                 SwingUtilities.invokeLater(update_complete)
             else:
                 self.log("No response received from server (connection failed or timeout)")
@@ -1954,14 +1996,27 @@ class BurpExtender(IBurpExtender, ITab):
                 f.write("# API Security Assessment Report\n\n")
                 f.write("Generated on: %s\n\n" % datetime.now().strftime("%Y-%m-%d %H:%M"))
                 
-                f.write("## Executive Summary\n")
-                f.write("This report provides a comprehensive overview of the API security assessment, including both identified vulnerabilities and verified safe endpoints.\n\n")
+                f.write("## 1. Executive Summary\n")
+                f.write("This report provides a comprehensive overview of the API security assessment, including identified vulnerabilities, verified safe endpoints, and an inventory of discovered parameters.\n\n")
                 
                 f.write("Total Vulnerabilities Discovered: **%d**\n" % len(vulnerable_findings))
-                f.write("Total Endpoints Verified Safe: **%d**\n\n" % len(not_vulnerable_endpoints))
+                f.write("Total Endpoints Verified Safe: **%d**\n" % len(not_vulnerable_endpoints))
+                f.write("Total API Endpoints Assessed: **%d**\n\n" % self.model.getRowCount())
+
+                if self.param_model.getRowCount() > 0:
+                    f.write("## 2. Data Dictionary (Parameters Mapping)\n\n")
+                    f.write("| Method | Path | Request Parameters | Response Parameters |\n")
+                    f.write("|--------|------|--------------------|---------------------|\n")
+                    for i in range(self.param_model.getRowCount()):
+                        meth = self.param_model.getValueAt(i, 0)
+                        path = self.param_model.getValueAt(i, 1)
+                        req = self.param_model.getValueAt(i, 2)
+                        res = self.param_model.getValueAt(i, 3)
+                        f.write("| %s | %s | %s | %s |\n" % (meth, path, req, res))
+                    f.write("\n")
 
                 if vulnerable_findings:
-                    f.write("## Vulnerabilities Overview\n\n")
+                    f.write("## 3. Vulnerabilities Overview\n\n")
                     f.write("| ID | Severity | Category | Endpoint | Status |\n")
                     f.write("|----|----------|----------|----------|--------|\n")
                     for v in vulnerable_findings:
@@ -2003,6 +2058,27 @@ class BurpExtender(IBurpExtender, ITab):
                         f.write("\n---\n\n")
                     
             self.stats.setText("Markdown report exported.")
+
+    def export_params_csv(self, event):
+        if self.param_model.getRowCount() == 0:
+            self.stats.setText("No parameters to export.")
+            return
+            
+        chooser = JFileChooser()
+        chooser.setSelectedFile(java.io.File("api_data_dictionary.csv"))
+        if chooser.showSaveDialog(None) == JFileChooser.APPROVE_OPTION:
+            file_path = chooser.getSelectedFile().getAbsolutePath()
+            with open(file_path, 'wb') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Method", "Path", "Request Parameters", "Response Parameters"])
+                for i in range(self.param_model.getRowCount()):
+                    writer.writerow([
+                        self.param_model.getValueAt(i, 0),
+                        self.param_model.getValueAt(i, 1),
+                        self.param_model.getValueAt(i, 2).encode('utf-8'),
+                        self.param_model.getValueAt(i, 3).encode('utf-8')
+                    ])
+            self.stats.setText("Parameters exported to CSV.")
 
     def export_vulns_json(self, event):
         if not self.vulnerabilities:
