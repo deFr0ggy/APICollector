@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 import java.io.File
 import javax.swing.border
-from burp import IBurpExtender, ITab
+from burp import IBurpExtender, ITab, IContextMenuFactory, IContextMenuInvocation, IMessageEditor, IMessageEditorController
 from javax.swing import (
     JTabbedPane, JPanel, JLabel, JTable, JScrollPane, JSplitPane,
     JTextField, JTextArea, JButton, JComboBox, JCheckBox, JFileChooser,
     BorderFactory, JOptionPane, SwingUtilities, ListSelectionModel,
-    JEditorPane, KeyStroke, AbstractAction
+    JEditorPane, KeyStroke, AbstractAction, JMenuItem
 )
 from javax.swing.table import DefaultTableModel, DefaultTableCellRenderer
 from javax.swing.event import ListSelectionListener, HyperlinkListener, DocumentListener, UndoableEditListener
@@ -38,6 +38,7 @@ class SimpleYamlParser:
     def parse(text):
         parser = SimpleYamlParser(text)
         return parser._parse_block(0)
+
 
     def _peek(self):
         while self.i < self.n:
@@ -163,7 +164,7 @@ class SimpleYamlParser:
          return None, None
 
 
-class BurpExtender(IBurpExtender, ITab):
+class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorController):
 
     def registerExtenderCallbacks(self, callbacks):
         self.callbacks = callbacks
@@ -178,6 +179,7 @@ class BurpExtender(IBurpExtender, ITab):
         self.vulnerabilities = [] 
         self.endpoint_findings = {}
         self.modifying_findings = False
+        self.active_request_ids = {} 
         
         self.owasp_top_10 = [
             "API1:2023 Broken Object Level Authorization",
@@ -228,8 +230,97 @@ class BurpExtender(IBurpExtender, ITab):
 
         self._build_ui()
         callbacks.addSuiteTab(self)
+        callbacks.registerContextMenuFactory(self)
 
         self.log("Loaded")
+
+    def getHttpService(self):
+        return None  
+
+    def getRequest(self):
+        return None
+
+    def getResponse(self):
+        return None
+
+    def createMenuItems(self, invocation):
+        self.context_menu_invocation = invocation
+        menu_list = []
+        menu_item = JMenuItem("Send to APICollector", actionPerformed=self.sendToAPICollector)
+        menu_list.append(menu_item)
+        return menu_list
+
+    def sendToAPICollector(self, event):
+        messages = self.context_menu_invocation.getSelectedMessages()
+        if not messages:
+            return
+            
+        for msg in messages:
+            try:
+                req_info = self.helpers.analyzeRequest(msg)
+                url = req_info.getUrl()
+                domain = url.getHost()
+                scheme = url.getProtocol()
+                method = req_info.getMethod()
+                path = url.getPath()
+                if url.getQuery():
+                    path += "?" + url.getQuery()
+                
+                headers = list(req_info.getHeaders())
+                auth_val = "Open"
+                for h in headers:
+                    if h.lower().startswith("authorization:") or h.lower().startswith("cookie:"):
+                        auth_val = "Auth"
+                        break
+                
+                req_bytes = msg.getRequest()
+                req_str = self.helpers.bytesToString(req_bytes) if req_bytes else ""
+                
+                resp_bytes = msg.getResponse()
+                resp_str = ""
+                status_text = "Pending"
+                if resp_bytes:
+                    resp_info = self.helpers.analyzeResponse(resp_bytes)
+                    status_code = resp_info.getStatusCode()
+                    status_text = str(status_code)
+                    resp_str = self.helpers.bytesToString(resp_bytes)
+                
+                def add_to_table():
+                    row_idx = self.model.getRowCount()
+                    self.model.addRow([
+                        domain, scheme, method, path, auth_val, "Medium", "API", status_text, "Pending"
+                    ])
+                    
+                    self.responses[row_idx] = {
+                        'request': req_str,
+                        'response': resp_str,
+                        'status': status_text
+                    }
+                    
+                    if req_bytes:
+                        try:
+                            req_body = self.helpers.bytesToString(req_bytes[req_info.getBodyOffset():])
+                            req_keys = self._extract_json_keys(json.loads(req_body))
+                        except: req_keys = set()
+                    else: req_keys = set()
+                    
+                    if resp_bytes:
+                        try:
+                            resp_body = self.helpers.bytesToString(resp_bytes[resp_info.getBodyOffset():])
+                            resp_keys = self._extract_json_keys(json.loads(resp_body))
+                        except: resp_keys = set()
+                    else: resp_keys = set()
+                    
+                    self.param_model.addRow([method, path, ", ".join(sorted(req_keys)), ", ".join(sorted(resp_keys))])
+                    
+                    self.stats.setText("Endpoint added from Context Menu.")
+                    
+                SwingUtilities.invokeLater(add_to_table)
+                
+            except Exception as e:
+                self.log("Context menu error: %s" % str(e))
+                traceback.print_exc()
+
 
 
     def _build_ui(self):
@@ -259,21 +350,11 @@ class BurpExtender(IBurpExtender, ITab):
 
         self.ep_bottom_tabs = JTabbedPane()
         
-        self.ep_req_area = JTextArea()
-        self.ep_req_area.setEditable(True) 
-        self.ep_req_area.setLineWrap(True)
-        self.ep_req_area.setWrapStyleWord(True)
-        self.ep_req_area.setFont(Font("Monospaced", Font.PLAIN, 12))
-        self._add_undo_redo(self.ep_req_area)
-        self.ep_res_area = JTextArea()
-        self.ep_res_area.setEditable(False)
-        self.ep_res_area.setLineWrap(True)
-        self.ep_res_area.setWrapStyleWord(True)
+        self.ep_req_editor = self.callbacks.createMessageEditor(self, True)
+        self._add_shortcut(self.ep_req_editor, self.send_endpoint_request)
+        self.ep_res_editor = self.callbacks.createMessageEditor(self, False)
         
-        self.endpoint_req_scroll = JScrollPane(self.ep_req_area)
-        self.endpoint_res_scroll = JScrollPane(self.ep_res_area)
-        
-        self.ep_detail_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, self.endpoint_req_scroll, self.endpoint_res_scroll)
+        self.ep_detail_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, self.ep_req_editor.getComponent(), self.ep_res_editor.getComponent())
         self.ep_detail_split.setResizeWeight(0.5)
         
         self.ep_bottom_tabs.addTab("Request / Response", self.ep_detail_split)
@@ -383,8 +464,6 @@ class BurpExtender(IBurpExtender, ITab):
 
         self.test_manager_panel = JPanel(BorderLayout())
         
-        self.test_manager_panel = JPanel(BorderLayout())
-        
         comp_tools = JPanel(BorderLayout())
         
         self.comp_stats = JLabel("Compliance Status: Ready to assess. Load rules or use defaults.")
@@ -410,23 +489,11 @@ class BurpExtender(IBurpExtender, ITab):
         self.preview_panel = JPanel(BorderLayout())
         
         self.tm_tabs = JTabbedPane()
-        self.tm_req_text = JTextArea()
-        self.tm_req_text.setEditable(True) 
-        self.tm_req_text.setLineWrap(True)
-        self.tm_req_text.setWrapStyleWord(True)
-        self.tm_req_text.setFont(Font("Monospaced", Font.PLAIN, 12))
-        self._add_undo_redo(self.tm_req_text)
+        self.tm_req_editor = self.callbacks.createMessageEditor(self, True)
+        self._add_shortcut(self.tm_req_editor, self.send_test_request)
+        self.tm_res_editor = self.callbacks.createMessageEditor(self, False)
         
-        self.tm_res_text = JTextArea()
-        self.tm_res_text.setEditable(False)
-        self.tm_res_text.setLineWrap(True)
-        self.tm_res_text.setWrapStyleWord(True)
-        self.tm_res_text.setFont(Font("Monospaced", Font.PLAIN, 12))
-        
-        self.tm_req_scroll = JScrollPane(self.tm_req_text)
-        self.tm_res_scroll = JScrollPane(self.tm_res_text)
-        
-        self.tm_detail_split = JSplitPane(JSplitPane.VERTICAL_SPLIT, self.tm_req_scroll, self.tm_res_scroll)
+        self.tm_detail_split = JSplitPane(JSplitPane.VERTICAL_SPLIT, self.tm_req_editor.getComponent(), self.tm_res_editor.getComponent())
         self.tm_detail_split.setResizeWeight(0.5)
         
         preview_controls = JPanel()
@@ -488,20 +555,11 @@ class BurpExtender(IBurpExtender, ITab):
         vuln_detail_panel = JPanel(BorderLayout())
         vuln_detail_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
         
-        self.vuln_req_area = JTextArea()
-        self.vuln_req_area.setEditable(False)
-        self.vuln_req_area.setLineWrap(True)
-        self.vuln_req_area.setWrapStyleWord(True)
-        self.vuln_req_area.setFont(Font("Monospaced", Font.PLAIN, 11))
+        self.vuln_req_editor = self.callbacks.createMessageEditor(self, False)
+        self.vuln_res_editor = self.callbacks.createMessageEditor(self, False)
         
-        self.vuln_resp_area = JTextArea()
-        self.vuln_resp_area.setEditable(False)
-        self.vuln_resp_area.setLineWrap(True)
-        self.vuln_resp_area.setWrapStyleWord(True)
-        self.vuln_resp_area.setFont(Font("Monospaced", Font.PLAIN, 11))
-        
-        vuln_detail_split.setLeftComponent(JScrollPane(self.vuln_req_area))
-        vuln_detail_split.setRightComponent(JScrollPane(self.vuln_resp_area))
+        vuln_detail_split.setLeftComponent(self.vuln_req_editor.getComponent())
+        vuln_detail_split.setRightComponent(self.vuln_res_editor.getComponent())
         vuln_detail_split.setResizeWeight(0.5)
         
         self.vuln_notes_area = JTextArea(4, 20)
@@ -700,16 +758,16 @@ class BurpExtender(IBurpExtender, ITab):
             
             self.stats.setText("Data cleared")
             self.update_dashboard(None)
-            self.tm_req_text.setText("")
-            self.tm_res_text.setText("")
+            self.tm_req_editor.setMessage(None, True)
+            self.tm_res_editor.setMessage(None, False)
             self.preview_btn.setEnabled(False)
             self.tm_send_btn.setEnabled(False)
             self.tm_reset_btn.setEnabled(False)
             
-            self.ep_req_area.setText("")
-            self.ep_res_area.setText("")
-            self.vuln_req_area.setText("")
-            self.vuln_resp_area.setText("")
+            self.ep_req_editor.setMessage(None, True)
+            self.ep_res_editor.setMessage(None, False)
+            self.vuln_req_editor.setMessage(None, False)
+            self.vuln_res_editor.setMessage(None, False)
             self.vuln_notes_area.setText("")
         
         self.env_model.setRowCount(0)
@@ -1135,6 +1193,25 @@ class BurpExtender(IBurpExtender, ITab):
         text_area.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_Y, InputEvent.CTRL_MASK), "Redo")
         text_area.getActionMap().put("Redo", RedoAction())
 
+    def _add_shortcut(self, editor, action_func):
+        class DelegateAction(AbstractAction):
+            def actionPerformed(self, e):
+                action_func(None)
+
+        comp = editor.getComponent()
+        def apply_shortcut(c):
+            if hasattr(c, 'getInputMap'):
+                c.getInputMap(JPanel.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(
+                    KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, InputEvent.CTRL_MASK), "ExecuteRequest"
+                )
+                c.getActionMap().put("ExecuteRequest", DelegateAction())
+            
+            if hasattr(c, 'getComponents'):
+                for sub in c.getComponents():
+                    apply_shortcut(sub)
+        
+        apply_shortcut(comp)
+
     def update_dashboard(self, event):
         total = self.model.getRowCount()
         if total == 0:
@@ -1433,17 +1510,17 @@ class BurpExtender(IBurpExtender, ITab):
         if row >= 0:
             test_id = self.test_model.getValueAt(row, 0)
             data = self.generated_tests_data[test_id]
-            self.tm_req_text.setText(self.helpers.bytesToString(data['request_bytes']))
+            self.tm_req_editor.setMessage(data['request_bytes'], True)
             
             resp = data.get('response_bytes')
-            self.tm_res_text.setText(self.helpers.bytesToString(resp) if resp else "") 
+            self.tm_res_editor.setMessage(resp, False) 
             
             self.preview_btn.setEnabled(True)
             self.tm_send_btn.setEnabled(True)
             self.tm_reset_btn.setEnabled(True)
         else:
-            self.tm_req_text.setText("")
-            self.tm_res_text.setText("")
+            self.tm_req_editor.setMessage(None, True)
+            self.tm_res_editor.setMessage(None, False)
             self.preview_btn.setEnabled(False)
             self.tm_send_btn.setEnabled(False)
             self.tm_reset_btn.setEnabled(False)
@@ -1469,8 +1546,8 @@ class BurpExtender(IBurpExtender, ITab):
     def clear_tests(self, event):
         self.test_model.setRowCount(0)
         self.generated_tests_data = []
-        self.tm_req_text.setText("")
-        self.tm_res_text.setText("")
+        self.tm_req_editor.setMessage(None, True)
+        self.tm_res_editor.setMessage(None, False)
         self.preview_btn.setEnabled(False)
         self.tm_send_btn.setEnabled(False)
         self.tm_reset_btn.setEnabled(False)
@@ -1480,14 +1557,14 @@ class BurpExtender(IBurpExtender, ITab):
         if row >= 0:
             test_id = self.test_model.getValueAt(row, 0)
             data = self.generated_tests_data[test_id]
-            self.tm_req_text.setText(self.helpers.bytesToString(data['request_bytes']))
+            self.tm_req_editor.setMessage(data['request_bytes'], True)
             resp = data.get('response_bytes')
-            self.tm_res_text.setText(self.helpers.bytesToString(resp) if resp else "")
+            self.tm_res_editor.setMessage(resp, False)
 
     def send_test_request(self, event):
-        req_str = self.tm_req_text.getText()
-        if not req_str:
-            self.tm_res_text.setText("Request empty")
+        req_bytes = self.tm_req_editor.getMessage()
+        if not req_bytes:
+            self.tm_res_editor.setMessage(self.helpers.stringToBytes("Request empty"), False)
             return
             
         row = self.test_table.getSelectedRow()
@@ -1499,9 +1576,8 @@ class BurpExtender(IBurpExtender, ITab):
         info = data['info']
 
         try:
-             req_bytes = self.helpers.stringToBytes(req_str)
              
-             self.tm_res_text.setText("Sending...")
+             self.tm_res_editor.setMessage(self.helpers.stringToBytes("Sending..."), False)
              resp = self.callbacks.makeHttpRequest(
                  info['host'],
                  info['port'],
@@ -1510,10 +1586,10 @@ class BurpExtender(IBurpExtender, ITab):
              )
              
              if resp:
-                 self.tm_res_text.setText(self.helpers.bytesToString(resp))
+                 self.tm_res_editor.setMessage(resp, False)
         except Exception as e:
             traceback.print_exc()
-            self.tm_res_text.setText("Error: %s" % e)
+            self.tm_res_editor.setMessage(self.helpers.stringToBytes("Error: %s" % e), False)
 
     def build_request_info(self, row):
         try:
@@ -1601,15 +1677,15 @@ class BurpExtender(IBurpExtender, ITab):
             
             if row in self.responses:
                 cached = self.responses[row]
-                self.ep_req_area.setText(cached['request'])
-                self.ep_res_area.setText(cached['response'])
+                self.ep_req_editor.setMessage(self.helpers.stringToBytes(cached['request']), True)
+                self.ep_res_editor.setMessage(self.helpers.stringToBytes(cached['response']), False)
                 self.stats.setText("Showing cached response (Status: %s)" % cached['status'])
             else:
                 info = self.build_request_info(row)
                 if info:
                     req_bytes = self.helpers.buildHttpMessage(info['headers'], info['body'].encode('utf-8') if info['body'] else b"")
-                    self.ep_req_area.setText(self.helpers.bytesToString(req_bytes))
-                    self.ep_res_area.setText("") 
+                    self.ep_req_editor.setMessage(req_bytes, True)
+                    self.ep_res_editor.setMessage(None, False)
             
             if self.autoScan.isSelected():
                 self.send_to_repeater(row)
@@ -1699,8 +1775,8 @@ class BurpExtender(IBurpExtender, ITab):
             'notes': "Add PoC details here...",
             'remediation': self.remediation_map.get(self.owasp_top_10[0], ""),
             'date': now,
-            'request': self.ep_req_area.getText(),
-            'response': self.ep_res_area.getText()
+            'request': self.helpers.bytesToString(self.ep_req_editor.getMessage()),
+            'response': self.helpers.bytesToString(self.ep_res_editor.getMessage())
         }
         
         if row not in self.endpoint_findings:
@@ -1737,26 +1813,23 @@ class BurpExtender(IBurpExtender, ITab):
         if not info:
              return
              
-        req_str = self.ep_req_area.getText()
-        t = threading.Thread(target=self._do_request, args=(row, info, req_str))
+        req_id = self.active_request_ids.get(row, 0) + 1
+        self.active_request_ids[row] = req_id
+        
+        req_bytes = self.ep_req_editor.getMessage()
+        t = threading.Thread(target=self._do_request, args=(row, info, req_bytes, req_id))
         t.start()
 
-    def _do_request(self, row, info, req_str=None):
+    def _do_request(self, row, info, req_data=None, generation_id=0):
         try:
             def update_start():
-                self.model.setValueAt("Sending...", row, 7)
-                self.stats.setText("Sending request...")
+                if self.active_request_ids.get(row) == generation_id:
+                    self.model.setValueAt("Sending...", row, 7)
+                    self.stats.setText("Sending request...")
             SwingUtilities.invokeLater(update_start)
             
-            if req_str:
-                req_bytes_temp = self.helpers.stringToBytes(req_str)
-                req_info = self.helpers.analyzeRequest(req_bytes_temp)
-                headers = list(req_info.getHeaders())
-                
-                body_offset = req_info.getBodyOffset()
-                body_bytes = req_bytes_temp[body_offset:]
-                
-                req_bytes = self.helpers.buildHttpMessage(headers, body_bytes)
+            if req_data:
+                req_bytes = req_data
             else:
                 req_bytes = self.helpers.buildHttpMessage(info['headers'], info['body'].encode('utf-8') if info['body'] else b"")
             
@@ -1771,6 +1844,9 @@ class BurpExtender(IBurpExtender, ITab):
                 req_bytes
             )
             
+            if self.active_request_ids.get(row) != generation_id:
+                return
+
             if resp:
                 status_code = self.helpers.analyzeResponse(resp).getStatusCode()
                 resp_str = self.helpers.bytesToString(resp)
@@ -1783,52 +1859,45 @@ class BurpExtender(IBurpExtender, ITab):
                 }
                 
                 def update_complete():
-                    self.model.setValueAt(status_text, row, 7)
-                    self.ep_res_area.setText(resp_str)
-                    self.stats.setText("Response received: %d bytes (Status: %d)" % (len(resp), status_code))
-                    
-                    # Log response parameters if it's JSON
-                    try:
-                        response_info = self.helpers.analyzeResponse(resp)
-                        body_offset = response_info.getBodyOffset()
-                        body = self.helpers.bytesToString(resp[body_offset:])
-                        data = json.loads(body)
-                        new_keys = self._extract_json_keys(data)
-                        if new_keys:
-                            self._update_param_row(row, res_keys=new_keys)
-                    except:
-                        pass # Not JSON or empty body
+                    if self.active_request_ids.get(row) == generation_id:
+                        self.model.setValueAt(status_text, row, 7)
+                        self.ep_res_editor.setMessage(resp, False)
+                        self.stats.setText("Response received: %d bytes (Status: %d)" % (len(resp), status_code))
                         
+                        try:
+                            response_info = self.helpers.analyzeResponse(resp)
+                            body_offset = response_info.getBodyOffset()
+                            body = self.helpers.bytesToString(resp[body_offset:])
+                            data = json.loads(body)
+                            new_keys = self._extract_json_keys(data)
+                            if new_keys:
+                                self._update_param_row(row, res_keys=new_keys)
+                        except:
+                            pass 
                 SwingUtilities.invokeLater(update_complete)
             else:
-                self.log("No response received from server (connection failed or timeout)")
-                
+                self.log("No response received from server")
                 self.responses[row] = {
                     'request': req_str_final,
-                    'response': "No response received. Check if the server is running and accessible.",
+                    'response': "No response received.",
                     'status': "No Response"
                 }
                 
                 def update_no_response():
-                    self.model.setValueAt("No Response", row, 7)
-                    self.ep_res_area.setText("No response received. Check if the server is running and accessible.")
-                    self.stats.setText("Request failed: No response from server")
+                    if self.active_request_ids.get(row) == generation_id:
+                        self.model.setValueAt("No Response", row, 7)
+                        self.ep_res_editor.setMessage(self.helpers.stringToBytes("No response received. Check if the server is running."), False)
+                        self.stats.setText("Request failed: No response")
                 SwingUtilities.invokeLater(update_no_response)
                 
         except Exception as e:
             traceback.print_exc()
             self.log("Request error: %s" % str(e))
-            
-            self.responses[row] = {
-                'request': req_str if req_str else "",
-                'response': "Error: %s" % e,
-                'status': "Error"
-            }
-            
             def update_error():
-                self.model.setValueAt("Error", row, 7)
-                self.ep_res_area.setText("Error: %s" % e)
-                self.stats.setText("Error sending request")
+                if self.active_request_ids.get(row) == generation_id:
+                    self.model.setValueAt("Error", row, 7)
+                    self.ep_res_editor.setMessage(self.helpers.stringToBytes("Error: %s" % e), False)
+                    self.stats.setText("Error sending request")
             SwingUtilities.invokeLater(update_error)
 
     def reset_endpoint_request(self, event):
@@ -1837,7 +1906,7 @@ class BurpExtender(IBurpExtender, ITab):
             info = self.build_request_info(row)
             if info:
                 req_bytes = self.helpers.buildHttpMessage(info['headers'], info['body'].encode('utf-8') if info['body'] else b"")
-                self.ep_req_area.setText(self.helpers.bytesToString(req_bytes))
+                self.ep_req_editor.setMessage(req_bytes, True)
                 self.stats.setText("Request reset to original.")
 
 
@@ -1847,8 +1916,8 @@ class BurpExtender(IBurpExtender, ITab):
             self.stats.setText("Select an endpoint first.")
             return
             
-        request = self.ep_req_area.getText()
-        response = self.ep_res_area.getText()
+        request = self.ep_req_editor.getMessage()
+        response = self.ep_res_editor.getMessage()
         
         if not response:
             confirm = JOptionPane.showConfirmDialog(None, 
@@ -1923,8 +1992,8 @@ class BurpExtender(IBurpExtender, ITab):
             if confirm == JOptionPane.YES_OPTION:
                 del self.vulnerabilities[row]
                 self.vuln_model.removeRow(row)
-                self.vuln_req_area.setText("")
-                self.vuln_resp_area.setText("")
+                self.vuln_req_editor.setMessage(None, False)
+                self.vuln_res_editor.setMessage(None, False)
                 self.vuln_notes_area.setText("")
 
     def vuln_selected(self, event):
@@ -1932,8 +2001,8 @@ class BurpExtender(IBurpExtender, ITab):
         row = self.vuln_table.getSelectedRow()
         if row >= 0:
             vuln = self.vulnerabilities[row]
-            self.vuln_req_area.setText(vuln['request'])
-            self.vuln_resp_area.setText(vuln['response'])
+            self.vuln_req_editor.setMessage(self.helpers.stringToBytes(vuln['request']), False)
+            self.vuln_res_editor.setMessage(self.helpers.stringToBytes(vuln['response']), False)
             self.vuln_notes_area.setText("Notes:\n%s\n\nRemediation Recommendation:\n%s" % (vuln['notes'], vuln.get('remediation', 'N/A')))
 
     def export_vulns_csv(self, event):

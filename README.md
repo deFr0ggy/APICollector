@@ -1,4 +1,4 @@
-# APICollector v0.0.2
+# APICollector v0.0.3
 ### Proactive API Security Assessment for Burp Suite
 
 **APICollector** is a comprehensive Burp Suite extension designed to streamline the entire API security testing lifecycle. It bridges the gap between development artifacts (like OpenAPI specs or Postman collections) and professional security auditing.
@@ -11,11 +11,12 @@ Whether you are performing a quick manual assessment or a full-scale API complia
 
 APICollector is built around a logical flow from discovery to delivery:
 
-1.  **Import**: Load your attack surface from **OpenAPI (YAML/JSON)**, **Postman**, **Insomnia**, or even **cURL** commands.
-2.  **Interact**: Use the live **Endpoints** table to modify requests on the fly, send them to Repeater, or execute them internally with live status tracking.
-3.  **Audit**: Run automated **Compliance Assessments** to check for missing security headers, information leakage, and best practices across grouped API paths.
-4.  **Track**: Document findings **inline** as you discover them. Capture evidence (Req/Res) automatically and assign OWASP API Top 10 categories.
-5.  **Report**: Generate professional **Markdown reports**, **CSVs**, or **JSON** exports that include verified safe endpoints and detailed vulnerability write-ups.
+1.  **Import**: Load your attack surface from **OpenAPI (YAML/JSON)**, **Postman**, **Insomnia**, or **cURL**.
+2.  **Context Ingestion (NEW)**: Right-click any request in Burp Proxy/Repeater and select **"Send to APICollector"** for instant indexing.
+3.  **Interact**: Modify requests using **Native Burp Editors** (Pretty/Hex/Raw) and execute them with live status tracking.
+4.  **Audit**: Run automated **Compliance Assessments** to check for missing security headers and info leaks.
+5.  **Track**: Document findings **inline**. Capture evidence (Req/Res) automatically with professional syntax highlighting.
+6.  **Report**: Generate professional **Markdown**, **CSV**, or **JSON** reports for your stakeholders.
 
 ---
 
@@ -27,9 +28,10 @@ APICollector is built around a logical flow from discovery to delivery:
 *   **Port & Domain Preservation**: Automatically extracts host, scheme, and non-standard ports (e.g., `:5000`) for local dev testing.
 
 ### 🧪 Advanced Endpoint Testing
-*   **Live Status Tracking**: Monitor HTTP response codes in real-time within the main utility grid.
+*   **Professional Native Editors**: Replaced basic text areas with Burp's native **IMessageEditor**—unlocking **Syntax Highlighting**, **Pretty/Hex/Raw** views, and native context menus.
+*   **Keyboard Power**: Use **CTRL+SPACE** to instantly trigger internal request execution from anywhere in the editor.
+*   **Request Cancellation**: Smart Generation ID system prevents UI hangs—clicking "Execute" again effectively cancels the previous attempt.
 *   **Response Caching**: Every endpoint "remembers" its last request and response, even after you switch tabs.
-*   **Editor Experience**: Native **Undo/Redo** (Ctrl+Z/Ctrl+Y) support and **Word Wrap** for managing complex JSON payloads.
 
 ### 🛡 Integrated Findings Management (NEW)
 *   **Inline Workflow**: Tag vulnerabilities directly in the main table with interactive dropdowns (Vulnerable, Safe, Pending).
@@ -60,6 +62,13 @@ APICollector is built around a logical flow from discovery to delivery:
 *   **Data Persistence**: Use the **Export JSON** feature to backup your current assessment findings for later use or integration with other tools.
 
 ---
+
+## 📝 Release Notes v0.0.3
+*   💎 **Native Burp Editors**: Full integration of professional message editors with syntax highlighting.
+*   🚀 **Context Menu Shortcut**: "Send to APICollector" feature for rapid traffic ingestion.
+*   ⌨️ **Keyboard Shortcuts**: CTRL+SPACE support for rapid request execution.
+*   🛑 **Execution Engine**: Reliable request handling with cancellation/generation tracking.
+*   🛠️ **Embedded Actions**: Native "Send to Repeater/Intruder" actions available directly within APICollector.
 
 ## 📝 Release Notes v0.0.2
 *   ✨ **Full Vulnerability Tracker**: Integrated inline findings management.
