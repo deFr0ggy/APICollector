@@ -169,7 +169,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
     def registerExtenderCallbacks(self, callbacks):
         self.callbacks = callbacks
         self.helpers = callbacks.getHelpers()
-        callbacks.setExtensionName("APICollector")
+        callbacks.setExtensionName("APICollector v0.0.3")
 
         self.env = {}
         self.bodies = {}
@@ -180,6 +180,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         self.endpoint_findings = {}
         self.modifying_findings = False
         self.active_request_ids = {} 
+        self.current_project_file = None
         
         self.owasp_top_10 = [
             "API1:2023 Broken Object Level Authorization",
@@ -262,9 +263,9 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                 domain = url.getHost()
                 scheme = url.getProtocol()
                 method = req_info.getMethod()
-                path = url.getPath()
+                path = self.helpers.urlDecode(url.getPath())
                 if url.getQuery():
-                    path += "?" + url.getQuery()
+                    path += "?" + self.helpers.urlDecode(url.getQuery())
                 
                 headers = list(req_info.getHeaders())
                 auth_val = "Open"
@@ -297,21 +298,14 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                         'status': status_text
                     }
                     
-                    if req_bytes:
-                        try:
-                            req_body = self.helpers.bytesToString(req_bytes[req_info.getBodyOffset():])
-                            req_keys = self._extract_json_keys(json.loads(req_body))
-                        except: req_keys = set()
-                    else: req_keys = set()
+                    self.responses[row_idx] = {
+                        'request': req_str,
+                        'response': resp_str,
+                        'status': status_text
+                    }
                     
-                    if resp_bytes:
-                        try:
-                            resp_body = self.helpers.bytesToString(resp_bytes[resp_info.getBodyOffset():])
-                            resp_keys = self._extract_json_keys(json.loads(resp_body))
-                        except: resp_keys = set()
-                    else: resp_keys = set()
-                    
-                    self.param_model.addRow([method, path, ", ".join(sorted(req_keys)), ", ".join(sorted(resp_keys))])
+                    req_keys, res_keys = self._get_all_parameters(req_bytes, resp_bytes)
+                    self.param_model.addRow([method, path, ", ".join(sorted(req_keys)), ", ".join(sorted(res_keys))])
                     
                     self.stats.setText("Endpoint added from Context Menu.")
                     
@@ -346,13 +340,14 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         self.table.getColumnModel().getColumn(8).setCellEditor(javax.swing.DefaultCellEditor(vuln_editor_combo))
 
         self.stats = JLabel("Ready")
-        self.endpoints_panel.add(self.stats, BorderLayout.NORTH)
+        self.stats.setBorder(javax.swing.border.EmptyBorder(5, 10, 5, 10))
 
         self.ep_bottom_tabs = JTabbedPane()
         
         self.ep_req_editor = self.callbacks.createMessageEditor(self, True)
         self._add_shortcut(self.ep_req_editor, self.send_endpoint_request)
         self.ep_res_editor = self.callbacks.createMessageEditor(self, False)
+        self._add_shortcut(self.ep_res_editor, self.send_endpoint_request)
         
         self.ep_detail_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, self.ep_req_editor.getComponent(), self.ep_res_editor.getComponent())
         self.ep_detail_split.setResizeWeight(0.5)
@@ -415,6 +410,15 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         controls.add(self.autoScan)
         controls.add(self.verbFilter)
 
+        project_controls = JPanel(FlowLayout(FlowLayout.LEFT))
+        project_controls.add(JLabel("Project:"))
+        project_controls.add(JButton("New", actionPerformed=self.new_project))
+        project_controls.add(JButton("Open", actionPerformed=self.open_project))
+        project_controls.add(JButton("Save", actionPerformed=self.save_project))
+        project_controls.add(JButton("Save As", actionPerformed=self.save_project_as))
+        project_controls.setBorder(javax.swing.border.MatteBorder(0, 0, 1, 0, Color.LIGHT_GRAY))
+        
+        self.endpoints_panel.add(project_controls, BorderLayout.NORTH)
         self.endpoints_panel.add(self.ep_split, BorderLayout.CENTER)
         self.endpoints_panel.add(controls, BorderLayout.SOUTH)
 
@@ -492,6 +496,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         self.tm_req_editor = self.callbacks.createMessageEditor(self, True)
         self._add_shortcut(self.tm_req_editor, self.send_test_request)
         self.tm_res_editor = self.callbacks.createMessageEditor(self, False)
+        self._add_shortcut(self.tm_res_editor, self.send_test_request)
         
         self.tm_detail_split = JSplitPane(JSplitPane.VERTICAL_SPLIT, self.tm_req_editor.getComponent(), self.tm_res_editor.getComponent())
         self.tm_detail_split.setResizeWeight(0.5)
@@ -536,41 +541,59 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         
         self.vuln_panel = JPanel(BorderLayout())
         
-        vuln_tools = JPanel()
-        vuln_tools.add(JButton("Add Vulnerability", actionPerformed=self.add_vulnerability))
-        vuln_tools.add(JButton("Delete Selected", actionPerformed=self.delete_vulnerability))
-        vuln_tools.add(JButton("Export CSV", actionPerformed=self.export_vulns_csv))
-        vuln_tools.add(JButton("Export Markdown", actionPerformed=self.export_vulns_markdown))
-        vuln_tools.add(JButton("Export JSON", actionPerformed=self.export_vulns_json))
+        vuln_top_panel = JPanel(BorderLayout())
         
-        self.vuln_panel.add(vuln_tools, BorderLayout.NORTH)
+        reval_tools = JPanel(FlowLayout(FlowLayout.RIGHT))
+        self.reval_status_combo = JComboBox(["Open", "Remediated", "Verified (Fixed)", "Re-Open (Failed)"])
+        reval_tools.add(JLabel("Set Status:"))
+        reval_tools.add(self.reval_status_combo)
+        reval_tools.add(JButton("Retest Finding", actionPerformed=self.retest_finding))
+        reval_tools.add(JButton("Mark as Verified", actionPerformed=self.mark_as_verified))
+        
+        vuln_export_tools = JPanel(FlowLayout(FlowLayout.LEFT))
+        vuln_export_tools.add(JButton("Export CSV", actionPerformed=self.export_vulns_csv))
+        vuln_export_tools.add(JButton("Export Markdown", actionPerformed=self.export_vulns_markdown))
+        vuln_export_tools.add(JButton("Export JSON", actionPerformed=self.export_vulns_json))
+        
+        vuln_top_panel.add(reval_tools, BorderLayout.EAST)
+        vuln_top_panel.add(vuln_export_tools, BorderLayout.WEST)
+        
+        self.vuln_panel.add(vuln_top_panel, BorderLayout.NORTH)
         
         self.vuln_model = DefaultTableModel(["ID", "Severity", "Type", "Endpoint", "Status", "Date"], 0)
         self.vuln_table = JTable(self.vuln_model)
         self.vuln_table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
         self.vuln_table.getSelectionModel().addListSelectionListener(self.vuln_selected)
         
-        self.vuln_table.getColumnModel().getColumn(1).setCellRenderer(SeverityRenderer())
+        self.vuln_table.getColumnModel().getColumn(4).setCellRenderer(VulnStatusRenderer())
         
-        vuln_detail_panel = JPanel(BorderLayout())
-        vuln_detail_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
+        self.vuln_detail_tabs = JTabbedPane()
         
+        original_panel = JPanel(BorderLayout())
         self.vuln_req_editor = self.callbacks.createMessageEditor(self, False)
         self.vuln_res_editor = self.callbacks.createMessageEditor(self, False)
+        orig_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, self.vuln_req_editor.getComponent(), self.vuln_res_editor.getComponent())
+        orig_split.setResizeWeight(0.5)
+        original_panel.add(orig_split, BorderLayout.CENTER)
+        self.vuln_detail_tabs.addTab("Original Evidence (PoC)", original_panel)
         
-        vuln_detail_split.setLeftComponent(self.vuln_req_editor.getComponent())
-        vuln_detail_split.setRightComponent(self.vuln_res_editor.getComponent())
-        vuln_detail_split.setResizeWeight(0.5)
+        reval_panel = JPanel(BorderLayout())
+        self.reval_req_editor = self.callbacks.createMessageEditor(self, False)
+        self.reval_res_editor = self.callbacks.createMessageEditor(self, False)
+        reval_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, self.reval_req_editor.getComponent(), self.reval_res_editor.getComponent())
+        reval_split.setResizeWeight(0.5)
+        reval_panel.add(reval_split, BorderLayout.CENTER)
+        self.vuln_detail_tabs.addTab("Revalidation Evidence (Retest)", reval_panel)
         
+        notes_panel = JPanel(BorderLayout())
         self.vuln_notes_area = JTextArea(4, 20)
         self.vuln_notes_area.setEditable(False)
         self.vuln_notes_area.setLineWrap(True)
         self.vuln_notes_area.setWrapStyleWord(True)
+        notes_panel.add(JScrollPane(self.vuln_notes_area), BorderLayout.CENTER)
+        self.vuln_detail_tabs.addTab("Notes & Remediation", notes_panel)
         
-        vuln_detail_panel.add(vuln_detail_split, BorderLayout.CENTER)
-        vuln_detail_panel.add(JScrollPane(self.vuln_notes_area), BorderLayout.SOUTH)
-        
-        vuln_main_split = JSplitPane(JSplitPane.VERTICAL_SPLIT, JScrollPane(self.vuln_table), vuln_detail_panel)
+        vuln_main_split = JSplitPane(JSplitPane.VERTICAL_SPLIT, JScrollPane(self.vuln_table), self.vuln_detail_tabs)
         vuln_main_split.setDividerLocation(250)
         
         self.vuln_panel.add(vuln_main_split, BorderLayout.CENTER)
@@ -578,6 +601,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         self.tabs.addTab("Vulnerabilities", self.vuln_panel)
 
         self.main_panel.add(self.tabs, BorderLayout.CENTER)
+        self.main_panel.add(self.stats, BorderLayout.SOUTH)
 
 
     def import_api(self, event):
@@ -704,7 +728,9 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
             u = URL(raw_url)
             domain = u.getHost()
             scheme = u.getProtocol().upper()
-            path = u.getPath() or "/"
+            path = self.helpers.urlDecode(u.getPath()) or "/"
+            if u.getQuery():
+                path += "?" + self.helpers.urlDecode(u.getQuery())
             
             for h in headers:
                 if "Authorization" in h:
@@ -735,15 +761,18 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
             self.log("cURL parse error: %s" % e)
             return False
 
-    def clear_data(self, event):
-        confirm = JOptionPane.showConfirmDialog(
-            self.main_panel,
-            "Are you sure you want to clear all imported APIs and results?",
-            "Confirm Clear Data",
-            JOptionPane.YES_NO_OPTION
-        )
+    def clear_data(self, event, silent=False):
+        if not silent:
+            confirm = JOptionPane.showConfirmDialog(
+                self.main_panel,
+                "Are you sure you want to clear all imported APIs and results?",
+                "Confirm Clear Data",
+                JOptionPane.YES_NO_OPTION
+            )
+            if confirm != JOptionPane.YES_OPTION:
+                return
         
-        if confirm == JOptionPane.YES_OPTION:
+        if True: 
             self.model.setRowCount(0)
             self.bodies = {}
             self.responses = {} 
@@ -869,7 +898,9 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                 domain = u.getHost()
                 scheme = u.getProtocol().upper()
                 verb = r.get("method", "GET")
-                path = u.getPath() or "/"
+                path = self.helpers.urlDecode(u.getPath()) or "/"
+                if u.getQuery():
+                    path += "?" + self.helpers.urlDecode(u.getQuery())
 
                 auth = self.insomnia_auth(r)
                 risk = self.risk(verb, auth)
@@ -943,7 +974,9 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                 if not ((scheme == "HTTP" and port == 80) or (scheme == "HTTPS" and port == 443)):
                     domain = "%s:%d" % (domain, port)
             
-            path = u.getPath() or "/"
+            path = self.helpers.urlDecode(u.getPath()) or "/"
+            if u.getQuery():
+                path += "?" + self.helpers.urlDecode(u.getQuery())
             
             verb = req.get("method", "GET")
 
@@ -1032,7 +1065,9 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                             domain = "%s:%d" % (domain, port)
                     
                     verb = method.upper()
-                    r_path = u.getPath()
+                    r_path = self.helpers.urlDecode(u.getPath())
+                    if u.getQuery():
+                        r_path += "?" + self.helpers.urlDecode(u.getQuery())
                     
                     auth = "None"
                     
@@ -1152,26 +1187,63 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         keys = set()
         if isinstance(data, dict):
             for k, v in data.items():
-                keys.add(k)
+                decoded_k = self.helpers.urlDecode(str(k))
+                keys.add(decoded_k)
                 keys.update(self._extract_json_keys(v))
         elif isinstance(data, list):
             for item in data:
                 keys.update(self._extract_json_keys(item))
         return keys
 
-    def _update_param_row(self, row, res_keys=None):
+    def _get_all_parameters(self, req_bytes, res_bytes=None):
+        req_keys = set()
+        res_keys = set()
+        
+        if req_bytes:
+            req_info = self.helpers.analyzeRequest(req_bytes)
+            for p in req_info.getParameters():
+                req_keys.add(self.helpers.urlDecode(p.getName()))
+            
+            try:
+                body_offset = req_info.getBodyOffset()
+                body_bytes = req_bytes[body_offset:]
+                if body_bytes and body_bytes[0] in [ord('{'), ord('[')]:
+                    data = json.loads(self.helpers.bytesToString(body_bytes))
+                    req_keys.update(self._extract_json_keys(data))
+            except: pass
+            
+        if res_bytes:
+            try:
+                res_info = self.helpers.analyzeResponse(res_bytes)
+                body_offset = res_info.getBodyOffset()
+                body_bytes = res_bytes[body_offset:]
+                if body_bytes and body_bytes[0] in [ord('{'), ord('[')]:
+                    data = json.loads(self.helpers.bytesToString(body_bytes))
+                    res_keys.update(self._extract_json_keys(data))
+            except: pass
+            
+        return req_keys, res_keys
+
+    def _update_param_row(self, row, req_keys=None, res_keys=None):
         if row < 0 or row >= self.param_model.getRowCount():
             return
             
-        def perform_sync():
-            existing_res = self.param_model.getValueAt(row, 3)
-            existing_set = set([p.strip() for p in existing_res.split(",") if p.strip()])
+        def perform_update():
+            if req_keys:
+                existing_req = self.param_model.getValueAt(row, 2)
+                existing_req_set = set([p.strip() for p in existing_req.split(",") if p.strip()])
+                merged_req = existing_req_set.union(req_keys)
+                if len(merged_req) > len(existing_req_set):
+                    self.param_model.setValueAt(", ".join(sorted(merged_req)), row, 2)
             
             if res_keys:
-                merged_res = existing_set.union(res_keys)
-                self.param_model.setValueAt(", ".join(sorted(merged_res)), row, 3)
-                
-        SwingUtilities.invokeLater(perform_sync)
+                existing_res = self.param_model.getValueAt(row, 3)
+                existing_res_set = set([p.strip() for p in existing_res.split(",") if p.strip()])
+                merged_res = existing_res_set.union(res_keys)
+                if len(merged_res) > len(existing_res_set):
+                    self.param_model.setValueAt(", ".join(sorted(merged_res)), row, 3)
+                    
+        SwingUtilities.invokeLater(perform_update)
 
     def _add_undo_redo(self, text_area):
         undo_manager = UndoManager()
@@ -1194,23 +1266,26 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         text_area.getActionMap().put("Redo", RedoAction())
 
     def _add_shortcut(self, editor, action_func):
+        outer_self = self
         class DelegateAction(AbstractAction):
             def actionPerformed(self, e):
-                action_func(None)
+                outer_self.log("DelegateAction triggered (isShowing=%s)" % editor.getComponent().isShowing())
+                if editor.getComponent().isShowing():
+                    action_func(None)
 
         comp = editor.getComponent()
-        def apply_shortcut(c):
-            if hasattr(c, 'getInputMap'):
-                c.getInputMap(JPanel.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(
-                    KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, InputEvent.CTRL_MASK), "ExecuteRequest"
-                )
-                c.getActionMap().put("ExecuteRequest", DelegateAction())
-            
-            if hasattr(c, 'getComponents'):
-                for sub in c.getComponents():
-                    apply_shortcut(sub)
+        key_strokes = [
+            KeyStroke.getKeyStroke("control SPACE"),
+            KeyStroke.getKeyStroke("control ENTER"),
+            KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.CTRL_DOWN_MASK),
+            KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, InputEvent.CTRL_DOWN_MASK),
+            KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, InputEvent.CTRL_MASK)
+        ]
         
-        apply_shortcut(comp)
+        for ks in key_strokes:
+            comp.getInputMap(JPanel.WHEN_IN_FOCUSED_WINDOW).put(ks, "ExecuteRequest")
+        
+        comp.getActionMap().put("ExecuteRequest", DelegateAction())
 
     def update_dashboard(self, event):
         total = self.model.getRowCount()
@@ -1725,6 +1800,99 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                     self.findings_model.setValueAt(new_remedy, f_row, 3)
 
             self._rebuild_global_vulnerabilities()
+    
+    def _get_project_data(self):
+        """Serialize all core project state to a dictionary."""
+        data = {
+            'version': '1.0',
+            'endpoints': [],
+            'parameters': [],
+            'findings': {},
+            'bodies': self.bodies,
+            'responses': self.responses,
+            'env': self.env,
+            'compliance_rules': self.compliance_rules
+        }
+
+        for r in range(self.model.getRowCount()):
+            row_data = [self.model.getValueAt(r, i) for i in range(self.model.getColumnCount())]
+            data['endpoints'].append(row_data)
+
+        for r in range(self.param_model.getRowCount()):
+            row_data = [self.param_model.getValueAt(r, i) for i in range(self.param_model.getColumnCount())]
+            data['parameters'].append(row_data)
+
+        data['findings'] = self.endpoint_findings
+
+        return data
+
+    def _load_project_data(self, data):
+        """Restore workspace from serialized data."""
+        self.clear_data(None, silent=True)
+        
+        for row in data.get('endpoints', []):
+            self.model.addRow(row)
+            
+        for row in data.get('parameters', []):
+            self.param_model.addRow(row)
+            
+        self.endpoint_findings = data.get('findings', {})
+        self.bodies = data.get('bodies', {})
+        self.responses = data.get('responses', {})
+        self.env = data.get('env', {})
+        self.compliance_rules = data.get('compliance_rules', {})
+        
+        self._rebuild_global_vulnerabilities()
+        self.update_dashboard(None)
+        self.sync_env_table(None)
+
+    def new_project(self, event):
+        confirm = JOptionPane.showConfirmDialog(None, "Start a new project? All unsaved data will be lost.", "New Project", JOptionPane.YES_NO_OPTION)
+        if confirm == JOptionPane.YES_OPTION:
+            self.clear_data(None, silent=True)
+            self.current_project_file = None
+            self.stats.setText("New project started.")
+
+    def open_project(self, event):
+        chooser = JFileChooser()
+        filter = javax.swing.filechooser.FileNameExtensionFilter("APICollector Project (*.apic)", ["apic"])
+        chooser.setFileFilter(filter)
+        if chooser.showOpenDialog(None) == JFileChooser.APPROVE_OPTION:
+            file_path = chooser.getSelectedFile().getAbsolutePath()
+            try:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                    self._load_project_data(data)
+                self.current_project_file = file_path
+                self.stats.setText("Project loaded: %s" % os.path.basename(file_path))
+            except Exception as e:
+                self.log("Error loading project: %s" % e)
+                JOptionPane.showMessageDialog(None, "Failed to load project: %s" % e)
+
+    def save_project(self, event):
+        if not self.current_project_file:
+            self.save_project_as(event)
+            return
+
+        try:
+            data = self._get_project_data()
+            with open(self.current_project_file, 'w') as f:
+                json.dump(data, f, indent=4)
+            self.stats.setText("Project saved: %s" % os.path.basename(self.current_project_file))
+        except Exception as e:
+            self.log("Save error: %s" % e)
+            JOptionPane.showMessageDialog(None, "Failed to save project: %s" % e)
+
+    def save_project_as(self, event):
+        chooser = JFileChooser()
+        chooser.setSelectedFile(java.io.File("my_project.apic"))
+        if chooser.showSaveDialog(None) == JFileChooser.APPROVE_OPTION:
+            file_path = chooser.getSelectedFile().getAbsolutePath()
+            if not file_path.endswith(".apic"):
+                file_path += ".apic"
+            
+            self.current_project_file = file_path
+            self.save_project(event)
 
     def _rebuild_global_vulnerabilities(self):
         self.vulnerabilities = []
@@ -1741,10 +1909,12 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                     'severity': f['severity'],
                     'type': f['owasp'],
                     'endpoint': endpoint,
-                    'status': "Confirmed",
+                    'status': f.get('reval_status', 'Open'),
                     'date': f['date'],
                     'request': f['request'],
                     'response': f['response'],
+                    'reval_request': f.get('reval_request', ''),
+                    'reval_response': f.get('reval_response', ''),
                     'notes': f['notes'],
                     'remediation': f.get('remediation', '')
                 }
@@ -1776,7 +1946,10 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
             'remediation': self.remediation_map.get(self.owasp_top_10[0], ""),
             'date': now,
             'request': self.helpers.bytesToString(self.ep_req_editor.getMessage()),
-            'response': self.helpers.bytesToString(self.ep_res_editor.getMessage())
+            'response': self.helpers.bytesToString(self.ep_res_editor.getMessage()),
+            'reval_status': "Open",
+            'reval_request': "",
+            'reval_response': ""
         }
         
         if row not in self.endpoint_findings:
@@ -1863,18 +2036,14 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                         self.model.setValueAt(status_text, row, 7)
                         self.ep_res_editor.setMessage(resp, False)
                         self.stats.setText("Response received: %d bytes (Status: %d)" % (len(resp), status_code))
-                        
-                        try:
-                            response_info = self.helpers.analyzeResponse(resp)
-                            body_offset = response_info.getBodyOffset()
-                            body = self.helpers.bytesToString(resp[body_offset:])
-                            data = json.loads(body)
-                            new_keys = self._extract_json_keys(data)
-                            if new_keys:
-                                self._update_param_row(row, res_keys=new_keys)
-                        except:
-                            pass 
                 SwingUtilities.invokeLater(update_complete)
+
+                try:
+                    req_keys, res_keys = self._get_all_parameters(req_bytes, resp)
+                    if req_keys or res_keys:
+                        self._update_param_row(row, req_keys=req_keys, res_keys=res_keys)
+                except:
+                    pass 
             else:
                 self.log("No response received from server")
                 self.responses[row] = {
@@ -2003,7 +2172,87 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
             vuln = self.vulnerabilities[row]
             self.vuln_req_editor.setMessage(self.helpers.stringToBytes(vuln['request']), False)
             self.vuln_res_editor.setMessage(self.helpers.stringToBytes(vuln['response']), False)
+            
+            reval_req = vuln.get('reval_request', '')
+            reval_res = vuln.get('reval_response', '')
+            self.reval_req_editor.setMessage(self.helpers.stringToBytes(reval_req), False)
+            self.reval_res_editor.setMessage(self.helpers.stringToBytes(reval_res), False)
+            
+            status = vuln.get('status', 'Open')
+            self.reval_status_combo.setSelectedItem(status)
+            
             self.vuln_notes_area.setText("Notes:\n%s\n\nRemediation Recommendation:\n%s" % (vuln['notes'], vuln.get('remediation', 'N/A')))
+
+    def retest_finding(self, event):
+        row = self.vuln_table.getSelectedRow()
+        if row < 0:
+            self.stats.setText("Select a vulnerability to retest.")
+            return
+            
+        vuln = self.vulnerabilities[row]
+        req_bytes = self.helpers.stringToBytes(vuln['request'])
+        
+        target_row = -1
+        parts = vuln['endpoint'].split(" ", 1)
+        if len(parts) == 2:
+            m, p = parts[0], parts[1]
+            for i in range(self.model.getRowCount()):
+                if self.model.getValueAt(i, 2) == m and self.model.getValueAt(i, 3) == p:
+                    target_row = i
+                    break
+        
+        if target_row >= 0:
+            self.tabs.setSelectedIndex(0)
+            self.table.setRowSelectionInterval(target_row, target_row)
+            self.ep_req_editor.setMessage(req_bytes, True)
+            self.ep_res_editor.setMessage(b"", False)
+            self.stats.setText("Original PoC pushed to Executor. Modify and run to verify fix.")
+        else:
+            self.stats.setText("Could not find original endpoint in table.")
+
+    def mark_as_verified(self, event):
+        v_row = self.vuln_table.getSelectedRow()
+        if v_row < 0:
+            self.stats.setText("Select a vulnerability in the tracker first.")
+            return
+            
+        vuln = self.vulnerabilities[v_row]
+        
+        retest_req = self.helpers.bytesToString(self.ep_req_editor.getMessage())
+        retest_res = self.helpers.bytesToString(self.ep_res_editor.getMessage())
+        
+        if not retest_res:
+             JOptionPane.showMessageDialog(None, "Running the retest first is recommended to capture evidence.")
+
+        new_status = self.reval_status_combo.getSelectedItem()
+        
+        status_updated = False
+        target_row = -1
+        parts = vuln['endpoint'].split(" ", 1)
+        if len(parts) == 2:
+            m, p = parts[0], parts[1]
+            for i in range(self.model.getRowCount()):
+                if self.model.getValueAt(i, 2) == m and self.model.getValueAt(i, 3) == p:
+                    target_row = i
+                    break
+        
+        if target_row >= 0 and target_row in self.endpoint_findings:
+            findings = self.endpoint_findings[target_row]
+            for f in findings:
+                if f['request'] == vuln['request'] and f['date'] == vuln['date']:
+                    f['reval_status'] = new_status
+                    f['reval_request'] = retest_req
+                    f['reval_response'] = retest_res
+                    status_updated = True
+                    break
+                    
+        if status_updated:
+            self._rebuild_global_vulnerabilities()
+            if v_row < self.vuln_table.getRowCount():
+                self.vuln_table.setRowSelectionInterval(v_row, v_row)
+            self.stats.setText("Revalidation captured for %s." % vuln['type'])
+        else:
+            self.stats.setText("Error updating finding status.")
 
     def export_vulns_csv(self, event):
         assessed_rows = []
@@ -2069,8 +2318,23 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                 f.write("This report provides a comprehensive overview of the API security assessment, including identified vulnerabilities, verified safe endpoints, and an inventory of discovered parameters.\n\n")
                 
                 f.write("Total Vulnerabilities Discovered: **%d**\n" % len(vulnerable_findings))
+                
+                resolved = [v for v in vulnerable_findings if v['status'] == "Verified (Fixed)"]
+                f.write("Total Issues Resolved & Verified: **%d**\n" % len(resolved))
                 f.write("Total Endpoints Verified Safe: **%d**\n" % len(not_vulnerable_endpoints))
                 f.write("Total API Endpoints Assessed: **%d**\n\n" % self.model.getRowCount())
+
+                if vulnerable_findings:
+                    f.write("### Remediation Progress\n\n")
+                    f.write("| Status | Count |\n")
+                    f.write("|--------|-------|\n")
+                    stats = {}
+                    for v in vulnerable_findings:
+                        s = v['status']
+                        stats[s] = stats.get(s, 0) + 1
+                    for s, count in stats.items():
+                        f.write("| %s | %d |\n" % (s, count))
+                    f.write("\n")
 
                 if self.param_model.getRowCount() > 0:
                     f.write("## 2. Data Dictionary (Parameters Mapping)\n\n")
@@ -2111,9 +2375,16 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                         f.write("- **Date:** %s\n" % v['date'])
                         f.write("\n#### Description & Notes\n%s\n" % v['notes'].encode('utf-8'))
                         f.write("\n#### Remediation Recommendation\n%s\n" % v.get('remediation', 'N/A').encode('utf-8'))
-                        f.write("\n#### Evidence (PoC)\n")
+                        
+                        f.write("\n#### Evidence (Original PoC)\n")
                         f.write("\n**Request:**\n```http\n%s\n```\n" % v['request'].encode('utf-8'))
                         f.write("\n**Response:**\n```http\n%s\n```\n" % v['response'].encode('utf-8'))
+                        
+                        if v.get('reval_response'):
+                             f.write("\n#### Verification Evidence (Retest)\n")
+                             f.write("\n**Retest Request:**\n```http\n%s\n```\n" % v['reval_request'].encode('utf-8'))
+                             f.write("\n**Retest Response:**\n```http\n%s\n```\n" % v['reval_response'].encode('utf-8'))
+                             
                         f.write("\n---\n\n")
 
                 if not_vulnerable_endpoints:
@@ -2249,13 +2520,16 @@ class VulnStatusRenderer(DefaultTableCellRenderer):
         c = super(VulnStatusRenderer, self).getTableCellRendererComponent(table, value, isSelected, hasFocus, row, col)
         s = str(value)
         
-        if s == "Vulnerable":
+        if s in ["Vulnerable", "Open", "Re-Open (Failed)"]:
             c.setForeground(Color.RED)
             c.setFont(c.getFont().deriveFont(Font.BOLD))
-        elif s == "Not Vulnerable":
+        elif s in ["Not Vulnerable", "Verified (Fixed)"]:
             c.setForeground(Color.decode("#00aa00"))
+            c.setFont(c.getFont().deriveFont(Font.BOLD))
+        elif s == "Remediated":
+            c.setForeground(Color.ORANGE.darker())
         else:
-            c.setForeground(Color.GRAY)
+            c.setForeground(Color.BLACK)
             
         return c
 

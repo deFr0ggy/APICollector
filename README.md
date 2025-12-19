@@ -3,45 +3,50 @@
 
 **APICollector** is a comprehensive Burp Suite extension designed to streamline the entire API security testing lifecycle. It bridges the gap between development artifacts (like OpenAPI specs or Postman collections) and professional security auditing.
 
-Whether you are performing a quick manual assessment or a full-scale API compliance audit, APICollector provides the central dashboard you need to import, test, document, and report.
+By centralizing discovery, documentation, and vulnerability tracking, APICollector allows auditors to maintain a clear, evidence-based view of the API attack surface.
 
 ---
 
-## 🔄 Core Workflow
+## 🚀 What's New in v0.0.3
 
-APICollector is built around a logical flow from discovery to delivery:
+### 📂 Advanced Project Management
+- **Total Project Isolation**: Save and load your entire workspace into standalone `.apic` files.
+- **Full Persistence**: All endpoints, findings, parameters, and evidence snapshots are persistent across Burp restarts.
+- **Client-Centric Workflow**: Easily switch between different assessments (e.g., `Client_A.apic` vs `Client_B.apic`) without data overlap.
 
-1.  **Import**: Load your attack surface from **OpenAPI (YAML/JSON)**, **Postman**, **Insomnia**, or **cURL**.
-2.  **Context Ingestion (NEW)**: Right-click any request in Burp Proxy/Repeater and select **"Send to APICollector"** for instant indexing.
-3.  **Interact**: Modify requests using **Native Burp Editors** (Pretty/Hex/Raw) and execute them with live status tracking.
-4.  **Audit**: Run automated **Compliance Assessments** to check for missing security headers and info leaks.
-5.  **Track**: Document findings **inline**. Capture evidence (Req/Res) automatically with professional syntax highlighting.
-6.  **Report**: Generate professional **Markdown**, **CSV**, or **JSON** reports for your stakeholders.
+### 🛡️ Vulnerability Revalidation Lifecycle
+- **Stateful Finding Tracking**: Track the resolution status of findings from **Open** ➔ **Remediated** ➔ **Verified (Fixed)**.
+- **Dual-Evidence snapshots**: Automatically capture and compare **Original PoC Evidence** vs. **Verification Retest Evidence**.
+- **Interactive Verification**: Instantly push any historical finding back to the internal executor to verify developer fixes in real-time.
+
+### 📊 Audit-Ready Reporting
+- **Remediation Progress**: Automated executive summaries showing remediation health and statistics.
+- **Evidence Documentation**: Professional Markdown reports now include side-by-side traffic snapshots for every verified finding, creating an incontrovertible audit trail.
+
+### 🔓 Universal Parameter Decoding
+- Deep integration with Burp's decoding engine ensures that all parameters (URL, Form, JSON) are displayed in a clean, human-readable format.
 
 ---
 
-## 🌟 Key Features
+## 🏗️ Core Workflow
 
-### 📡 Unified API Discovery & Import
-*   **Universal Support**: Seamlessly parse OpenAPI 2.0/3.0 (YAML & JSON), Postman v2.1, Insomnia, and cURL.
-*   **Zero Dependencies**: Features a custom-built, lightweight YAML parser—no manual library installations required.
-*   **Port & Domain Preservation**: Automatically extracts host, scheme, and non-standard ports (e.g., `:5000`) for local dev testing.
+1.  **Ingestion**: Import your attack surface from **OpenAPI (YAML/JSON)**, **Postman**, **Insomnia**, or **cURL**.
+2.  **Context**: Right-click any traffic in Burp Proxy/Repeater and select **"Send to APICollector"** for instant indexing.
+3.  **Analysis**: Use the **Endpoints** and **Parameters** tabs to build a comprehensive data dictionary and risk map.
+4.  **Testing**: Use the **Internal Executor** for rapid iteration using native Burp editors, or push to **Burp Repeater**.
+5.  **Audit**: Document findings in the **Endpoints** tab to automatically populate the **Vulnerabilities** dashboard.
+6.  **Verify**: Re-test findings using the **Revalidation Panel** and capture proof-of-fix snapshots.
+7.  **Report**: Generate professional **Markdown**, **CSV**, or **JSON** reports for stakeholders.
 
-### 🧪 Advanced Endpoint Testing
-*   **Professional Native Editors**: Replaced basic text areas with Burp's native **IMessageEditor**—unlocking **Syntax Highlighting**, **Pretty/Hex/Raw** views, and native context menus.
-*   **Keyboard Power**: Use **CTRL+SPACE** to instantly trigger internal request execution from anywhere in the editor.
-*   **Request Cancellation**: Smart Generation ID system prevents UI hangs—clicking "Execute" again effectively cancels the previous attempt.
-*   **Response Caching**: Every endpoint "remembers" its last request and response, even after you switch tabs.
+---
 
-### 🛡 Integrated Findings Management (NEW)
-*   **Inline Workflow**: Tag vulnerabilities directly in the main table with interactive dropdowns (Vulnerable, Safe, Pending).
-*   **Smart Remediation**: Automatically pre-fills fix recommendations based on the **OWASP API Security Top 10 (2023)**.
-*   **Evidence Automation**: One-click "Add Finding" captures the current request/response traffic as proof-of-concept evidence.
+## 🛠️ Key Features
 
-### 📊 Professional Compliance Auditing
-*   **Path Grouping**: Automatically organizes endpoints by API segments for cleaner assessment views.
-*   **Rule-Based Scanning**: Scans for mandatory headers (CSP, HSTS, etc.) and forbidden headers (Server, X-Powered-By) to detect leaks in bulk.
-*   **Traffic Logging**: View the exact response that triggered a compliance violation directly in the audit tab.
+- **Multi-Source Support**: Seamless parsing of modern API documentation standards.
+- **Native Burp Integration**: Full use of `IMessageEditor` for professional syntax highlighting and context menus.
+- **Automated Compliance**: Built-in OWASP API Top 10 (2023) mapping and security configuration scanning.
+- **Extensible Rules**: Load custom compliance rules via JSON to match your specific audit requirements.
+- **Zero Dependencies**: Includes an embedded, lightweight YAML parser for portability.
 
 ---
 
@@ -50,32 +55,29 @@ APICollector is built around a logical flow from discovery to delivery:
 1.  Download the `APICollector.py` file.
 2.  In Burp Suite, go to the **Extensions** tab -> **Installed** -> **Add**.
 3.  Select **Python** as the extension type and point to the `APICollector.py` file.
-4.  (Prerequisite: Ensure **Jython** is configured in your Burp Suite options).
-5.  Open the **APICollector** tab and click **Import API** to get started!
+4.  *(Prerequisite: Ensure **Jython 2.7.x** is configured in your Burp Suite options).*
 
 ---
 
-## 📖 Usage Tips
+## 📖 Release History
 
-*   **Documenting Safe Endpoints**: Mark verified secure APIs as "Not Vulnerable." They will be included in your final report in a dedicated "Verified Safe" section to show a complete audit trail.
-*   **Path Grouping**: Use the Compliance tab to see how your security posture looks across different microservices or API versions using the "Group" column.
-*   **Data Persistence**: Use the **Export JSON** feature to backup your current assessment findings for later use or integration with other tools.
+### v0.0.3 (Current)
+- Implemented **File-Based Project Management** (.apic system).
+- Implemented **Vulnerability Revalidation** with state tracking and dual-evidence capture.
+- Automated **Universal URL Decoding** for all parameter types.
+- Optimized performance for large JSON handling (EDT thread offloading).
+- Added **Global Status Bar** for persistent operational feedback.
+- Simplified Vulnerability Dashboard for a cleaner result-driven UI.
 
----
+### v0.0.2
+- **Context Menu Integration**: Added "Send to APICollector" for live traffic ingestion.
+- **Native Editors**: Integrated Burp's native message editors for professional traffic analysis.
+- **YAML Support**: Added embedded support for OpenAPI YAML specifications.
+- **Internal Executor**: Fixed thread-locking issues for a more responsive UI.
 
-## 📝 Release Notes v0.0.3
-*   💎 **Native Burp Editors**: Full integration of professional message editors with syntax highlighting.
-*   🚀 **Context Menu Shortcut**: "Send to APICollector" feature for rapid traffic ingestion.
-*   ⌨️ **Keyboard Shortcuts**: CTRL+SPACE support for rapid request execution.
-*   🛑 **Execution Engine**: Reliable request handling with cancellation/generation tracking.
-*   🛠️ **Embedded Actions**: Native "Send to Repeater/Intruder" actions available directly within APICollector.
-
-## 📝 Release Notes v0.0.2
-*   ✨ **Full Vulnerability Tracker**: Integrated inline findings management.
-*   ✨ **Remediation Engine**: Smart recommendations for OWASP API risks.
-*   ✨ **Reporting+**: Comprehensive Markdown/CSV exports including safe endpoints and evidence.
-*   ✨ **UX Overhaul**: Added undo/redo, word wrap, and thread-safe UI updates.
-*   ✨ **Improved Parsing**: Enhanced OpenAPI YAML support and variable resolution for Postman.
+### v0.0.1
+- Initial release with Support for OpenAPI, Postman, and Insomnia.
+- Automated parameter extraction and basic reporting engine.
 
 ---
-*Developed for professional security researchers and API developers.*
+*Developed by **Kamran Saifullah** for professional security researchers and API developers.*
