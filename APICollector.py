@@ -169,7 +169,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
     def registerExtenderCallbacks(self, callbacks):
         self.callbacks = callbacks
         self.helpers = callbacks.getHelpers()
-        callbacks.setExtensionName("APICollector v0.0.3")
+        callbacks.setExtensionName("APICollector v0.0.4")
 
         self.env = {}
         self.bodies = {}
@@ -1288,74 +1288,138 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         comp.getActionMap().put("ExecuteRequest", DelegateAction())
 
     def update_dashboard(self, event):
-        total = self.model.getRowCount()
-        if total == 0:
-             self.dash_content.setText("<html><body><h2>No API Loaded</h2></body></html>")
+        total_endpoints = self.model.getRowCount()
+        if total_endpoints == 0:
+             self.dash_content.setText("<html><body><h2 style='font-family:sans-serif;'>No API Loaded</h2></body></html>")
              return
 
-        owasp_hits = {
-            "API1:2023 Broken Object Level Authorization": [],
-            "API2:2023 Broken Authentication": [],
-            "API3:2023 Broken Object Property Level Authorization": [],
-            "API4:2023 Unrestricted Resource Consumption": [],
-            "API5:2023 Broken Function Level Authorization": [],
-            "API6:2023 Unrestricted Access to Sensitive Business Flows": [],
-            "API7:2023 Server Side Request Forgery": [],
-            "API8:2023 Security Misconfiguration": [],
-            "API9:2023 Improper Inventory Management": [],
-            "API10:2023 Unsafe Consumption of APIs": []
-        }
+        severity_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
+        status_counts = {"Open": 0, "Remediated": 0, "Verified (Fixed)": 0, "Re-Open (Failed)": 0}
+        
+        vulnerable_endpoints = set()
+        for ep_row, findings in self.endpoint_findings.items():
+            if findings:
+                vulnerable_endpoints.add(ep_row)
+        
+        total_findings = len(self.vulnerabilities)
+        for v in self.vulnerabilities:
+            sev = v.get('severity', 'Medium')
+            if sev in severity_counts: severity_counts[sev] += 1
+            
+            stat = v.get('status', 'Open')
+            if stat in status_counts: status_counts[stat] += 1
 
-        for i in range(total):
+        verified_count = status_counts["Verified (Fixed)"]
+        progress_pct = (float(verified_count) / total_findings * 100) if total_findings > 0 else 0
+        
+        owasp_hits = {k: [] for k in self.owasp_top_10}
+        for i in range(total_endpoints):
             row_data = self._get_row_data(i)
             hits = self.check_owasp_rules(row_data)
             for h in hits:
                 link = "<a href='goto:%d'>%s %s</a>" % (i, row_data['method'], row_data['path'])
-                owasp_hits[h].append(link)
+                if h in owasp_hits: owasp_hits[h].append(link)
 
         html = """
         <html>
         <head><style>
-            body{font-family: sans-serif; padding: 20px; color: #333;} 
-            h1{color: #2c3e50;}
-            h2{color: #e67e22; margin-top: 20px; border-bottom: 2px solid #eee;} 
-            .stat{margin: 10px 0; padding: 10px; background: #f9f9f9; border-left: 4px solid #ddd;}
-            .bad{border-left-color: #e74c3c;}
-            .warn{border-left-color: #f1c40f;}
-            ul{margin-top: 5px; font-size: 12px; color: #555;}
-            li{font-family: monospace; list-style-type: none; margin-bottom: 2px;}
-            a{text-decoration: none; color: #3498db;}
+            body { font-family: 'Segoe UI', Tahoma, sans-serif; padding: 25px; color: #2c3e50; background-color: #ffffff; }
+            h1 { color: #1a2a3a; border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-bottom: 25px; font-weight: 300; }
+            h2 { color: #34495e; margin-top: 35px; margin-bottom: 15px; font-size: 18px; text-transform: uppercase; letter-spacing: 1px; }
+            
+            .grid { display: block; margin-bottom: 30px; }
+            .card { display: inline-block; width: 160px; padding: 15px; margin-right: 15px; margin-bottom: 15px; 
+                    border-radius: 8px; color: white; text-align: center; vertical-align: top; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+            
+            .sev-Critical { background-color: #8b0000; }
+            .sev-High { background-color: #e74c3c; }
+            .sev-Medium { background-color: #e67e22; }
+            .sev-Low { background-color: #f1c40f; color: #2c3e50; }
+            .sev-Info { background-color: #3498db; }
+            
+            .status-box { background: #f8f9fa; border: 1px solid #dee2e6; color: #495057; }
+            .val { font-size: 28px; font-weight: bold; display: block; margin-bottom: 5px; }
+            .lab { font-size: 11px; text-transform: uppercase; font-weight: 600; opacity: 0.9; }
+            
+            .progress-container { background: #eee; border-radius: 10px; height: 12px; margin: 15px 0; width: 100%%; max-width: 500px; }
+            .progress-bar { background: #27ae60; height: 100%%; border-radius: 10px; width: %d%%; }
+            .inventory-row { font-size: 13px; color: #7f8c8d; margin-bottom: 20px; }
+            
+            .stat-item { margin: 10px 0; padding: 12px; background: #fdfdfd; border: 1px solid #eee; border-left: 4px solid #ccd1d1; }
+            .stat-hit { border-left-color: #e74c3c; background: #fff5f5; }
+            ul { margin-top: 8px; padding-left: 20px; }
+            li { font-family: 'Consolas', monospace; font-size: 12px; margin-bottom: 4px; color: #c0392b; }
+            a { color: #2980b9; text-decoration: none; }
+            a:hover { text-decoration: underline; }
         </style></head>
         <body>
-            <h1>API Security Dashboard</h1>
-            <p>Static Analysis of <b>%d</b> endpoints against OWASP API Security Top 10 (2023).</p><br>
+            <h1>Assessment Analytics Overview</h1>
             
-            %s
+            <div class="inventory-row">
+                <b>Active Inventory:</b> %d Endpoints | <b>Risk Surface:</b> %d Vulnerable Endpoints (%d%%)
+            </div>
+
+            <h2>Risk Distribution</h2>
+            <div class="grid">
+                <div class="card sev-Critical"><span class="val">%d</span><span class="lab">Critical</span></div>
+                <div class="card sev-High"><span class="val">%d</span><span class="lab">High</span></div>
+                <div class="card sev-Medium"><span class="val">%d</span><span class="lab">Medium</span></div>
+                <div class="card sev-Low"><span class="val">%d</span><span class="lab">Low</span></div>
+                <div class="card sev-Info"><span class="val">%d</span><span class="lab">Info</span></div>
+            </div>
+
+            <h2>Remediation Health</h2>
+            <div class="inventory-row">
+                <b>Current Progress:</b> %d%% of findings verified as fixed.
+                <div class="progress-container"><div class="progress-bar"></div></div>
+            </div>
+            <div class="grid">
+                <div class="card status-box"><span class="val">%d</span><span class="lab">Open Findings</span></div>
+                <div class="card status-box" style="border-left: 4px solid #27ae60;"><span class="val">%d</span><span class="lab" style="color:#27ae60;">Verified (Fixed)</span></div>
+                <div class="card status-box" style="border-left: 4px solid #f39c12;"><span class="val">%d</span><span class="lab" style="color:#f39c12;">Remediated</span></div>
+                <div class="card status-box" style="border-left: 4px solid #c0392b;"><span class="val">%d</span><span class="lab" style="color:#c0392b;">Re-Open (Failed)</span></div>
+            </div>
+
+            <br>
+            <hr style="border:0; border-top:1px solid #eee;">
+            
+            <h2>OWASP Compliance Coverage</h2>
+            <p style="font-size:12px; color:#95a5a6;">Static analysis of endpoints against standard API risks.</p>
+            
+            [SECTIONS]
         </body>
         </html>
         """ 
-        
-        sections = ""
+
+        sections_html = ""
         for rule_name in sorted(owasp_hits.keys()):
             hits = owasp_hits[rule_name]
             count = len(hits)
-            css_class = "bad" if count > 0 else "stat"
             
-            hits_html = ""
+            hits_list_html = ""
             if count > 0:
-                hits_html = "<ul>" + "".join(["<li>%s</li>" % h for h in hits])
-                hits_html += "</ul>"
+                hits_list_html = "<ul>" + "".join(["<li>%s</li>" % h for h in hits]) + "</ul>"
             else:
-                hits_html = "<span style='color:green; font-size:12px; margin-left:10px;'>No obvious issues detected</span>"
+                hits_list_html = "<div style='color:#27ae60; font-size:11px; margin-top:5px;'>PASSED - No obvious static patterns detected</div>"
 
-            sections += """
-            <div class="stat %s">
-                <b>%s</b>: %d potential issues
+            sections_html += """
+            <div class="stat-item %s">
+                <b style="font-size:13px;">%s</b> <span style="font-size:12px; color:#7f8c8d;">- %d suspected areas</span>
                 %s
             </div>
-            """ % (css_class if count > 0 else "", rule_name, count, hits_html)
+            """ % ("stat-hit" if count > 0 else "", rule_name, count, hits_list_html)
 
-        self.dash_content.setText(html % (total, sections))
+        final_html = html.replace("[SECTIONS]", sections_html)
+        
+        risk_pct = (len(vulnerable_endpoints) * 100 // total_endpoints) if total_endpoints > 0 else 0
+        
+        self.dash_content.setText(final_html % (
+            int(progress_pct),
+            total_endpoints, len(vulnerable_endpoints), int(risk_pct),
+            severity_counts["Critical"], severity_counts["High"], severity_counts["Medium"], severity_counts["Low"], severity_counts["Info"],
+            int(progress_pct),
+            status_counts["Open"], status_counts["Verified (Fixed)"], status_counts["Remediated"], status_counts["Re-Open (Failed)"]
+        ))
 
     def dashboard_link_clicked(self, event):
         if event.getEventType() == HyperlinkEvent.EventType.ACTIVATED:
